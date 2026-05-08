@@ -7,6 +7,7 @@ module Memory #(
     input  logic        cyc_i,      // Indica uma transação ativa
     input  logic        stb_i,      // Indica uma solicitação ativa
     input  logic        we_i,       // 1 = Write, 0 = Read
+    input  logic [3:0]  sel_i,      // Byte enables para escrita
 
     input  logic [31:0] addr_i,     // Endereço
     input  logic [31:0] data_i,     // Dados de entrada (para escrita)
@@ -34,7 +35,10 @@ module Memory #(
     // Escrita síncrona
     always_ff @(posedge clk) begin
         if (cyc_i && stb_i && we_i) begin
-            memory[addr_i[BIT_INDEX:2]] <= data_i;
+            if (sel_i[0]) memory[addr_i[BIT_INDEX:2]][7:0]   <= data_i[7:0];
+            if (sel_i[1]) memory[addr_i[BIT_INDEX:2]][15:8]  <= data_i[15:8];
+            if (sel_i[2]) memory[addr_i[BIT_INDEX:2]][23:16] <= data_i[23:16];
+            if (sel_i[3]) memory[addr_i[BIT_INDEX:2]][31:24] <= data_i[31:24];
         end
     end
 

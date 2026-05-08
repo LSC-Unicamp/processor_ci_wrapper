@@ -397,6 +397,7 @@ def simulate_to_check(
             logger.info(
                 f'Address: 0x{expected_output[0]:08X}, Data: 0x{expected_output[1]:08X}'
             )
+            return True
         else:
             logger.error(
                 'Simulation completed, but the expected output was not found.'
@@ -405,5 +406,7 @@ def simulate_to_check(
                 f'Expected: Address 0x{expected_output[0]:08X}, Data: 0x{expected_output[1]:08X}'
             )
             logger.error('Check the logs above for more details.')
+            return False
     else:
         logger.error('Simulation executable not found.')
+        return False
