@@ -18,6 +18,12 @@ from core.bus_defines import (
     axi4_data_adapter,
     axi4_lite_adapter,
     axi4_lite_data_adapter,
+    ahb_adapter_vhd,
+    ahb_data_adapter_vhd,
+    axi4_lite_adapter_vhd,
+    axi4_lite_data_adapter_vhd,
+    axi4_adapter_vhd,
+    axi4_data_adapter_vhd,
 )
 
 logger = logging.getLogger(__name__)
@@ -477,6 +483,164 @@ def generate_instance(
     return '\n'.join(lines), '\n'.join(assign_list), '\n'.join(create_list)
 
 
+def generate_instance_vhdl(
+    code: str,
+    mapping: dict,
+    second_memory: bool = False,
+    instance_name: str = 'u_processor',
+    use_adapter: bool = False,
+):
+    """
+    Generates a VHDL component instantiation from an entity declaration.
+    
+    Args:
+        code: VHDL entity code (entity ... port (...) ...)
+        mapping: Port mapping dictionary
+        second_memory: Whether dual memory is enabled
+        instance_name: Instance name for the component
+        use_adapter: Whether bus adapters are used
+    
+    Returns:
+        tuple: (instance_code, signal_assignments, signal_declarations)
+    """
+    # Locate entity ... port ( ... )
+    entity_pat = re.compile(
+        r'\bentity\s+([A-Za-z_]\w*)\s+is\b.*?'
+        r'port\s*\(\s*(?P<ports>.*?)\s*\);',
+        re.DOTALL | re.IGNORECASE,
+    )
+    m = entity_pat.search(code)
+    if not m:
+        raise ValueError(
+            'Unable to locate VHDL entity declaration (entity ... port (...) ...)'
+        )
+    
+    entity_name = m.group(1)
+    ports_block = m.group('ports') or ''
+    
+    # Parse VHDL ports
+    ports = []
+    chunks = _split_top_level_commas(ports_block)
+    current_dir = None
+    
+    for chunk in chunks:
+        s = chunk.strip()
+        if not s:
+            continue
+        
+        # Match VHDL port syntax: name : direction type
+        # Example: clk : in std_logic;
+        # Example: data : out std_logic_vector(31 downto 0);
+        port_match = re.match(
+            r'^\s*([A-Za-z_]\w*)\s*:\s*(in|out|inout)\b\s+(.+)$',
+            s,
+            re.IGNORECASE,
+        )
+        if port_match:
+            name = port_match.group(1)
+            direction = port_match.group(2).lower()
+            type_str = port_match.group(3).strip().rstrip(';')
+            
+            # Extract bit width from type string
+            # std_logic => width 1
+            # std_logic_vector(31 downto 0) => width 32
+            width = 1
+            if 'vector' in type_str.lower():
+                vec_match = re.search(
+                    r'\((\d+)\s+downto\s+(\d+)\)',
+                    type_str,
+                    re.IGNORECASE,
+                )
+                if vec_match:
+                    msb = int(vec_match.group(1))
+                    lsb = int(vec_match.group(2))
+                    width = abs(msb - lsb) + 1
+            
+            ports.append((direction, name, width))
+    
+    # Apply same signal mapping logic as Verilog
+    controller_signals_non_open = CONTROLLER_SIGNALS_NON_OPEN
+    if second_memory:
+        controller_signals_non_open.update(DATA_MEM_SIGNALS_NON_OPEN)
+    
+    assign_list = []
+    create_list = []
+    created_signals = set()
+    
+    # Generate port map
+    port_names = [p[1] for p in ports]
+    max_port_len = max((len(p) for p in port_names), default=0)
+    
+    lines = []
+    lines.append(f'{instance_name} : {entity_name}')
+    lines.append('  port map (')
+    
+    for i, (direction, port, width) in enumerate(ports):
+        conn = ''
+        is_last = i == len(ports) - 1
+        
+        # Clock detection
+        if direction == 'in' and ('clk' in port.lower() or 'clock' in port.lower()):
+            conn = 'clk_core'
+        # Reset detection
+        elif direction == 'in' and (
+            'rst_n' in port.lower()
+            or 'reset_n' in port.lower()
+            or 'rstn' in port.lower()
+            or 'resetn' in port.lower()
+            or 'nrst' in port.lower()
+            or 'nreset' in port.lower()
+            or 'rstb' in port.lower()
+            or 'resetb' in port.lower()
+            or 'brst' in port.lower()
+            or 'breset' in port.lower()
+            or 'rst_b' in port.lower()
+            or 'reset_b' in port.lower()
+            or 'rstz' in port.lower()
+            or 'resetz' in port.lower()
+            or 'zrst' in port.lower()
+            or 'zreset' in port.lower()
+            or 'rst_z' in port.lower()
+            or 'reset_z' in port.lower()
+        ):
+            conn = 'not rst_core'
+        elif direction == 'in' and (
+            'rst' in port.lower() or 'reset' in port.lower()
+        ):
+            conn = 'rst_core'
+        elif port in mapping:
+            if mapping[port] is None or mapping[port] == '' or mapping[port] == 'null':
+                conn = ''
+            else:
+                conn = str(mapping[port])
+        elif direction == 'in':
+            pl = port.lower()
+            if 'dbg_' in pl or 'trace_' in pl or 'trc_' in pl or 'jtag' in pl:
+                conn = 'open'
+            elif (
+                pl.endswith('_en')
+                or pl.endswith('_valid')
+                or 'poweron' in pl
+                or 'start_' in pl
+            ):
+                conn = "'1'"
+            else:
+                conn = "'0'"
+        else:
+            conn = ''
+        
+        if conn:
+            comma = ',' if not is_last else ' '
+            lines.append(f'    {port:<{max_port_len}} => {conn}{comma}')
+        else:
+            comma = ',' if not is_last else ' '
+            lines.append(f'    {port:<{max_port_len}} => open{comma}')
+    
+    lines.append('  );')
+    
+    return '\n'.join(lines), '', ''
+
+
 def generate_wrapper(
     cpu_name: str,
     instance_code: str,
@@ -485,30 +649,46 @@ def generate_wrapper(
     output_dir='outputs',
     signal_mappings: str = '',
     create_signals: str = '',
+    is_vhdl: bool = False,
 ):
     env = Environment(loader=FileSystemLoader(TEMPLATES_DIR))
-    template = env.get_template('wrapper.j2')
+    
+    # Choose template based on HDL type
+    template_name = 'wrapper_vhdl.j2' if is_vhdl else 'wrapper_sv.j2'
+    template = env.get_template(template_name)
 
-    logger.info(f'Bus type: {bus_type}, Second memory: {second_memory}')
+    logger.info(f'Bus type: {bus_type}, Second memory: {second_memory}, HDL: {"VHDL" if is_vhdl else "SystemVerilog"}')
 
     adapter = ''
 
-    if bus_type == 'AHB':
-        adapter = ahb_adapter
-        if second_memory:
-            adapter += '\n' + ahb_data_adapter
-    elif bus_type == 'AXI':
-        adapter = axi4_adapter
-        if second_memory:
-            adapter += '\n' + axi4_data_adapter
-    elif bus_type == 'AXI-Lite':
-        adapter = axi4_lite_adapter
-        if second_memory:
-            adapter += '\n' + axi4_lite_data_adapter
-    # elif bus_type == 'Avalon':
-    #     adapter = avalon_adapter
-    #     if second_memory:
-    #         adapter += '\n' + avalon_data_adapter
+    if is_vhdl:
+        # Select VHDL adapters
+        if bus_type == 'AHB':
+            adapter = ahb_adapter_vhd
+            if second_memory:
+                adapter += '\n' + ahb_data_adapter_vhd
+        elif bus_type == 'AXI':
+            adapter = axi4_adapter_vhd
+            if second_memory:
+                adapter += '\n' + axi4_data_adapter_vhd
+        elif bus_type == 'AXI-Lite':
+            adapter = axi4_lite_adapter_vhd
+            if second_memory:
+                adapter += '\n' + axi4_lite_data_adapter_vhd
+    else:
+        # Select Verilog adapters
+        if bus_type == 'AHB':
+            adapter = ahb_adapter
+            if second_memory:
+                adapter += '\n' + ahb_data_adapter
+        elif bus_type == 'AXI':
+            adapter = axi4_adapter
+            if second_memory:
+                adapter += '\n' + axi4_data_adapter
+        elif bus_type == 'AXI-Lite':
+            adapter = axi4_lite_adapter
+            if second_memory:
+                adapter += '\n' + axi4_lite_data_adapter
 
     output = template.render(
         {
@@ -523,7 +703,9 @@ def generate_wrapper(
 
     os.makedirs(output_dir, exist_ok=True)
 
-    output_path = f'{output_dir}/{cpu_name}.sv'
+    # Choose output extension based on HDL type
+    output_ext = 'vhd' if is_vhdl else 'sv'
+    output_path = f'{output_dir}/{cpu_name}.{output_ext}'
 
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(output)

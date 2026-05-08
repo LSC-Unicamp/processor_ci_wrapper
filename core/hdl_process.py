@@ -299,6 +299,109 @@ def process_verilog(
     return header_str, other_files, include_flags, files
 
 
+def process_vhdl(
+    cpu_name: str,
+    top_module: str,
+    files: list[str],
+    include_dirs: list[str],
+    processor_path,
+    context: int = 20,
+    get_files_in_project: bool = False,
+):
+    """
+    Process VHDL files by extracting the entity header without conversion to Verilog.
+    
+    Args:
+        cpu_name: Processor name
+        top_module: Top entity name
+        files: List of VHDL file paths
+        include_dirs: List of include directories (mostly unused for VHDL)
+        processor_path: Root path to processor source
+        context: Number of context lines after entity declaration
+        get_files_in_project: Whether to search for files in the project
+    
+    Returns:
+        tuple: (header_str, vhdl_files, [], files)
+    """
+    vhdl_files = []
+    
+    os.makedirs(BUILD_DIR, exist_ok=True)
+    
+    for file_rel in files:
+        src_file = os.path.join(processor_path, file_rel)
+        if not os.path.exists(src_file):
+            logger.warning(f'File not found: {src_file}')
+            continue
+        if file_rel.strip().split('.')[-1].lower() in ['vhdl', 'vhd']:
+            vhdl_files.append(str(src_file))
+    
+    if not vhdl_files:
+        logger.warning('No VHDL files found')
+        return '', [], [], []
+    
+    logger.debug('Found VHDL files:')
+    for vhdl_file in vhdl_files:
+        logger.debug(f' - {vhdl_file}')
+    
+    # Read all VHDL files and extract entity declaration
+    header_lines = []
+    all_lines = []
+    found_entity = False
+    inside_entity = False
+    counter = 0
+    
+    for vhdl_file in vhdl_files:
+        try:
+            with open(vhdl_file, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+                lines = content.splitlines()
+                all_lines.extend(lines)
+                
+                # Look for entity declaration
+                entity_pattern = re.compile(
+                    rf'^\s*entity\s+{re.escape(top_module)}\s+is\b',
+                    re.IGNORECASE | re.MULTILINE
+                )
+                
+                for line in lines:
+                    if entity_pattern.match(line):
+                        found_entity = True
+                        inside_entity = True
+                    
+                    if inside_entity:
+                        header_lines.append(line)
+                        if 'end' in line.lower() and (
+                            'entity' in line.lower() or ';' in line
+                        ):
+                            inside_entity = False
+                            counter = 0
+                        elif counter >= context:
+                            break
+                        else:
+                            counter += 1
+                
+                if found_entity:
+                    break
+        except Exception as e:
+            logger.warning(f'Error reading {vhdl_file}: {e}')
+            continue
+    
+    if not found_entity:
+        logger.warning(f'Entity {top_module} not found in VHDL files')
+        return '', vhdl_files, [], vhdl_files
+    
+    header_str = '\n'.join(header_lines)
+    
+    files_found = []
+    if get_files_in_project:
+        # For VHDL, just return the processed files
+        files_found = vhdl_files
+    
+    logger.debug(f'Extracted VHDL entity header:\n{header_str}')
+    
+    return header_str, vhdl_files, [], files_found
+
+
 def simulate_to_check(
     cpu_name: str,
     files_list: list[str],

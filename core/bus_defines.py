@@ -431,3 +431,393 @@ axi4_to_wishbone_simple #(
     .WB_ACK               (data_mem_ack),                  // 1 bit
 );
 """
+ahb_adapter_vhd = """
+-- AHB - Instruction bus
+signal HADDR      : std_logic_vector(31 downto 0);
+signal HWRITE     : std_logic;
+signal HSIZE      : std_logic_vector(2 downto 0);
+signal HBURST     : std_logic_vector(2 downto 0);
+signal HMASTLOCK  : std_logic;
+signal HPROT      : std_logic_vector(3 downto 0);
+signal HTRANS     : std_logic_vector(1 downto 0);
+signal HWDATA     : std_logic_vector(31 downto 0);
+signal HRDATA     : std_logic_vector(31 downto 0);
+signal HREADY     : std_logic;
+signal HRESP      : std_logic_vector(1 downto 0);
+
+ahb2wb_inst : entity work.ahb_to_wishbone
+  generic map (
+    ADDR_WIDTH => 32,
+    DATA_WIDTH => 32
+  )
+  port map (
+    -- Clock & Reset
+    HCLK      => clk_core,
+    HRESETn   => not rst_core,
+
+    -- AHB interface
+    HADDR     => HADDR,
+    HTRANS    => HTRANS,
+    HWRITE    => HWRITE,
+    HSIZE     => HSIZE,
+    HBURST    => HBURST,
+    HPROT     => HPROT,
+    HLOCK     => HMASTLOCK,
+    HWDATA    => HWDATA,
+    HREADY    => HREADY,
+    HRDATA    => HRDATA,
+    HREADYOUT => HREADY,
+    HRESP     => HRESP,
+
+    -- Wishbone interface
+    wb_cyc    => core_cyc,
+    wb_stb    => core_stb,
+    wb_we     => core_we,
+    wb_wstrb  => core_sel,
+    wb_adr    => core_addr,
+    wb_dat_w  => core_data_out,
+    wb_dat_r  => core_data_in,
+    wb_ack    => core_ack
+  );
+"""
+
+ahb_data_adapter_vhd = """
+-- AHB - Data bus
+signal DATA_HADDR      : std_logic_vector(31 downto 0);
+signal DATA_HWRITE     : std_logic;
+signal DATA_HSIZE      : std_logic_vector(2 downto 0);
+signal DATA_HBURST     : std_logic_vector(2 downto 0);
+signal DATA_HMASTLOCK  : std_logic;
+signal DATA_HPROT      : std_logic_vector(3 downto 0);
+signal DATA_HTRANS     : std_logic_vector(1 downto 0);
+signal DATA_HWDATA     : std_logic_vector(31 downto 0);
+signal DATA_HRDATA     : std_logic_vector(31 downto 0);
+signal DATA_HREADY     : std_logic;
+signal DATA_HRESP      : std_logic_vector(1 downto 0);
+
+data_ahb2wb_inst : entity work.ahb_to_wishbone
+  generic map (
+    ADDR_WIDTH => 32,
+    DATA_WIDTH => 32
+  )
+  port map (
+    -- Clock & Reset
+    HCLK      => clk_core,
+    HRESETn   => not rst_core,
+
+    -- AHB interface
+    HADDR     => DATA_HADDR,
+    HTRANS    => DATA_HTRANS,
+    HWRITE    => DATA_HWRITE,
+    HSIZE     => DATA_HSIZE,
+    HBURST    => DATA_HBURST,
+    HPROT     => DATA_HPROT,
+    HLOCK     => DATA_HMASTLOCK,
+    HWDATA    => DATA_HWDATA,
+    HREADY    => DATA_HREADY,
+    HRDATA    => DATA_HRDATA,
+    HREADYOUT => DATA_HREADY,
+    HRESP     => DATA_HRESP,
+
+    -- Wishbone interface
+    wb_cyc    => data_mem_cyc,
+    wb_stb    => data_mem_stb,
+    wb_we     => data_mem_we,
+    wb_wstrb  => data_mem_sel,
+    wb_adr    => data_mem_addr,
+    wb_dat_w  => data_mem_data_out,
+    wb_dat_r  => data_mem_data_in,
+    wb_ack    => data_mem_ack
+  );
+"""
+
+axi4_lite_adapter_vhd = """
+signal AWADDR   : std_logic_vector(31 downto 0);
+signal AWPROT   : std_logic_vector(2 downto 0);
+signal AWVALID  : std_logic;
+signal AWREADY  : std_logic;
+
+signal WDATA    : std_logic_vector(31 downto 0);
+signal WSTRB    : std_logic_vector(3 downto 0);
+signal WVALID   : std_logic;
+signal WREADY   : std_logic;
+
+signal BRESP    : std_logic_vector(1 downto 0);
+signal BVALID   : std_logic;
+signal BREADY   : std_logic;
+
+signal ARADDR   : std_logic_vector(31 downto 0);
+signal ARPROT   : std_logic_vector(2 downto 0);
+signal ARVALID  : std_logic;
+signal ARREADY  : std_logic;
+
+signal RDATA    : std_logic_vector(31 downto 0);
+signal RRESP    : std_logic_vector(1 downto 0);
+signal RVALID   : std_logic;
+signal RREADY   : std_logic;
+
+u_AXI4Lite_to_Wishbone : entity work.AXI4Lite_to_Wishbone
+  generic map (
+    ADDR_WIDTH => 32,
+    DATA_WIDTH => 32
+  )
+  port map (
+    ACLK     => clk_core,
+    ARESETN  => not rst_core,
+
+    AWADDR   => AWADDR,
+    AWPROT   => AWPROT,
+    AWVALID  => AWVALID,
+    AWREADY  => AWREADY,
+
+    WDATA    => WDATA,
+    WSTRB    => WSTRB,
+    WVALID   => WVALID,
+    WREADY   => WREADY,
+
+    BRESP    => BRESP,
+    BVALID   => BVALID,
+    BREADY   => BREADY,
+
+    ARADDR   => ARADDR,
+    ARPROT   => ARPROT,
+    ARVALID  => ARVALID,
+    ARREADY  => ARREADY,
+
+    RDATA    => RDATA,
+    RRESP    => RRESP,
+    RVALID   => RVALID,
+    RREADY   => RREADY,
+
+    wb_adr_o => core_addr,
+    wb_dat_o => core_data_out,
+    wb_we_o  => core_we,
+    wb_stb_o => core_stb,
+    wb_cyc_o => core_cyc,
+    wb_sel_o => core_sel,
+    wb_dat_i => core_data_in,
+    wb_ack_i => core_ack,
+    wb_err_i => '0'
+  );
+"""
+
+axi4_lite_data_adapter_vhd = """
+signal DATA_ACLK      : std_logic;
+signal DATA_ARESETN   : std_logic;
+
+signal DATA_AWADDR    : std_logic_vector(31 downto 0);
+signal DATA_AWPROT    : std_logic_vector(2 downto 0);
+signal DATA_AWVALID   : std_logic;
+signal DATA_AWREADY   : std_logic;
+
+signal DATA_WDATA     : std_logic_vector(31 downto 0);
+signal DATA_WSTRB     : std_logic_vector(3 downto 0);
+signal DATA_WVALID    : std_logic;
+signal DATA_WREADY    : std_logic;
+
+signal DATA_BRESP     : std_logic_vector(1 downto 0);
+signal DATA_BVALID    : std_logic;
+signal DATA_BREADY    : std_logic;
+
+signal DATA_ARADDR    : std_logic_vector(31 downto 0);
+signal DATA_ARPROT    : std_logic_vector(2 downto 0);
+signal DATA_ARVALID   : std_logic;
+signal DATA_ARREADY   : std_logic;
+
+signal DATA_RDATA     : std_logic_vector(31 downto 0);
+signal DATA_RRESP     : std_logic_vector(1 downto 0);
+signal DATA_RVALID    : std_logic;
+signal DATA_RREADY    : std_logic;
+
+u_data_AXI4Lite_to_Wishbone : entity work.AXI4Lite_to_Wishbone
+  generic map (
+    ADDR_WIDTH => 32,
+    DATA_WIDTH => 32
+  )
+  port map (
+    ACLK     => DATA_ACLK,
+    ARESETN  => DATA_ARESETN,
+
+    AWADDR   => DATA_AWADDR,
+    AWPROT   => DATA_AWPROT,
+    AWVALID  => DATA_AWVALID,
+    AWREADY  => DATA_AWREADY,
+
+    WDATA    => DATA_WDATA,
+    WSTRB    => DATA_WSTRB,
+    WVALID   => DATA_WVALID,
+    WREADY   => DATA_WREADY,
+
+    BRESP    => DATA_BRESP,
+    BVALID   => DATA_BVALID,
+    BREADY   => DATA_BREADY,
+
+    ARADDR   => DATA_ARADDR,
+    ARPROT   => DATA_ARPROT,
+    ARVALID  => DATA_ARVALID,
+    ARREADY  => DATA_ARREADY,
+
+    RDATA    => DATA_RDATA,
+    RRESP    => DATA_RRESP,
+    RVALID   => DATA_RVALID,
+    RREADY   => DATA_RREADY,
+
+    wb_adr_o => data_mem_addr,
+    wb_dat_o => data_mem_data_out,
+    wb_we_o  => data_mem_we,
+    wb_stb_o => data_mem_stb,
+    wb_cyc_o => data_mem_cyc,
+    wb_sel_o => data_mem_sel,
+    wb_dat_i => data_mem_data_in,
+    wb_ack_i => data_mem_ack,
+    wb_err_i => '0'
+  );
+"""
+
+axi4_adapter_vhd = """
+signal AXI_AWID     : std_logic_vector(3 downto 0);
+signal AXI_AWADDR   : std_logic_vector(31 downto 0);
+signal AXI_AWVALID  : std_logic;
+signal AXI_AWREADY  : std_logic;
+
+signal AXI_WDATA    : std_logic_vector(31 downto 0);
+signal AXI_WSTRB    : std_logic_vector(3 downto 0);
+signal AXI_WVALID   : std_logic;
+signal AXI_WREADY   : std_logic;
+
+signal AXI_BID      : std_logic_vector(3 downto 0);
+signal AXI_BRESP    : std_logic_vector(1 downto 0);
+signal AXI_BVALID   : std_logic;
+signal AXI_BREADY   : std_logic;
+
+signal AXI_ARID     : std_logic_vector(3 downto 0);
+signal AXI_ARADDR   : std_logic_vector(31 downto 0);
+signal AXI_ARVALID  : std_logic;
+signal AXI_ARREADY  : std_logic;
+
+signal AXI_RID      : std_logic_vector(3 downto 0);
+signal AXI_RDATA    : std_logic_vector(31 downto 0);
+signal AXI_RRESP    : std_logic_vector(1 downto 0);
+signal AXI_RVALID   : std_logic;
+signal AXI_RREADY   : std_logic;
+
+u_axi4_to_wishbone_simple : entity work.axi4_to_wishbone_simple
+  generic map (
+    ADDR_WIDTH => 32,
+    DATA_WIDTH => 32,
+    ID_WIDTH   => 4
+  )
+  port map (
+    clk         => clk_core,
+    rst_n       => not rst_core,
+
+    AXI_AWID    => AXI_AWID,
+    AXI_AWADDR  => AXI_AWADDR,
+    AXI_AWVALID => AXI_AWVALID,
+    AXI_AWREADY => AXI_AWREADY,
+
+    AXI_WDATA   => AXI_WDATA,
+    AXI_WSTRB   => AXI_WSTRB,
+    AXI_WVALID  => AXI_WVALID,
+    AXI_WREADY  => AXI_WREADY,
+
+    AXI_BID     => AXI_BID,
+    AXI_BRESP   => AXI_BRESP,
+    AXI_BVALID  => AXI_BVALID,
+    AXI_BREADY  => AXI_BREADY,
+
+    AXI_ARID    => AXI_ARID,
+    AXI_ARADDR  => AXI_ARADDR,
+    AXI_ARVALID => AXI_ARVALID,
+    AXI_ARREADY => AXI_ARREADY,
+
+    AXI_RID     => AXI_RID,
+    AXI_RDATA   => AXI_RDATA,
+    AXI_RRESP   => AXI_RRESP,
+    AXI_RVALID  => AXI_RVALID,
+    AXI_RREADY  => AXI_RREADY,
+
+    WB_CYC      => core_cyc,
+    WB_STB      => core_stb,
+    WB_WE       => core_we,
+    WB_ADDR     => core_addr,
+    WB_WDATA    => core_data_out,
+    WB_SEL      => core_sel,
+    WB_RDATA    => core_data_in,
+    WB_ACK      => core_ack
+  );
+"""
+
+axi4_data_adapter_vhd = """
+signal DATA_AXI_AWID     : std_logic_vector(3 downto 0);
+signal DATA_AXI_AWADDR   : std_logic_vector(31 downto 0);
+signal DATA_AXI_AWVALID  : std_logic;
+signal DATA_AXI_AWREADY  : std_logic;
+
+signal DATA_AXI_WDATA    : std_logic_vector(31 downto 0);
+signal DATA_AXI_WSTRB    : std_logic_vector(3 downto 0);
+signal DATA_AXI_WVALID   : std_logic;
+signal DATA_AXI_WREADY   : std_logic;
+
+signal DATA_AXI_BID      : std_logic_vector(3 downto 0);
+signal DATA_AXI_BRESP    : std_logic_vector(1 downto 0);
+signal DATA_AXI_BVALID   : std_logic;
+signal DATA_AXI_BREADY   : std_logic;
+
+signal DATA_AXI_ARID     : std_logic_vector(3 downto 0);
+signal DATA_AXI_ARADDR   : std_logic_vector(31 downto 0);
+signal DATA_AXI_ARVALID  : std_logic;
+signal DATA_AXI_ARREADY  : std_logic;
+
+signal DATA_AXI_RID      : std_logic_vector(3 downto 0);
+signal DATA_AXI_RDATA    : std_logic_vector(31 downto 0);
+signal DATA_AXI_RRESP    : std_logic_vector(1 downto 0);
+signal DATA_AXI_RVALID   : std_logic;
+signal DATA_AXI_RREADY   : std_logic;
+
+u_data_axi4_to_wishbone_simple : entity work.axi4_to_wishbone_simple
+  generic map (
+    ADDR_WIDTH => 32,
+    DATA_WIDTH => 32,
+    ID_WIDTH   => 4
+  )
+  port map (
+    clk         => clk_core,
+    rst_n       => not rst_core,
+
+    AXI_AWID    => DATA_AXI_AWID,
+    AXI_AWADDR  => DATA_AXI_AWADDR,
+    AXI_AWVALID => DATA_AXI_AWVALID,
+    AXI_AWREADY => DATA_AXI_AWREADY,
+
+    AXI_WDATA   => DATA_AXI_WDATA,
+    AXI_WSTRB   => DATA_AXI_WSTRB,
+    AXI_WVALID  => DATA_AXI_WVALID,
+    AXI_WREADY  => DATA_AXI_WREADY,
+
+    AXI_BID     => DATA_AXI_BID,
+    AXI_BRESP   => DATA_AXI_BRESP,
+    AXI_BVALID  => DATA_AXI_BVALID,
+    AXI_BREADY  => DATA_AXI_BREADY,
+
+    AXI_ARID    => DATA_AXI_ARID,
+    AXI_ARADDR  => DATA_AXI_ARADDR,
+    AXI_ARVALID => DATA_AXI_ARVALID,
+    AXI_ARREADY => DATA_AXI_ARREADY,
+
+    AXI_RID     => DATA_AXI_RID,
+    AXI_RDATA   => DATA_AXI_RDATA,
+    AXI_RRESP   => DATA_AXI_RRESP,
+    AXI_RVALID  => DATA_AXI_RVALID,
+    AXI_RREADY  => DATA_AXI_RREADY,
+
+    WB_CYC      => data_mem_cyc,
+    WB_STB      => data_mem_stb,
+    WB_WE       => data_mem_we,
+    WB_ADDR     => data_mem_addr,
+    WB_WDATA    => data_mem_data_out,
+    WB_SEL      => data_mem_sel,
+    WB_RDATA    => data_mem_data_in,
+    WB_ACK      => data_mem_ack
+  );
+"""
