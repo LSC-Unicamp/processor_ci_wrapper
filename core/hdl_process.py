@@ -4,19 +4,21 @@ import subprocess
 import logging
 from core import BUILD_DIR, INTERNAL_DIR
 from core.defines import KEYWORDS
+from jinja2 import Environment, FileSystemLoader
 
 
 logger = logging.getLogger(__name__)
 
 
-def run_ghdl_import(cpu_name, vhdl_files):
+def run_ghdl_import(cpu_name, vhdl_files, work_lib: str | None = None):
     """Importar todos os arquivos VHDL com GHDL -i."""
     logger.info('Importing VHDL files with GHDL (-i)...')
+    work_name = work_lib or cpu_name
     cmd = [
         'ghdl',
         '-i',
         '--std=08',
-        f'--work={cpu_name}',
+        f'--work={work_name}',
         f'--workdir={BUILD_DIR}',
         f'-P{BUILD_DIR}',
     ] + list(map(str, vhdl_files))
@@ -24,14 +26,32 @@ def run_ghdl_import(cpu_name, vhdl_files):
     subprocess.run(cmd, check=True)
 
 
-def run_ghdl_elaborate(cpu_name, top_module):
+def run_ghdl_elaborate(cpu_name, top_module, work_lib: str | None = None):
     """Elaborar com GHDL -m."""
     logger.info('Elaborating project with GHDL (-m)...')
+    work_name = work_lib or cpu_name
     cmd = [
         'ghdl',
         '-m',
         '--std=08',
-        f'--work={cpu_name}',
+        f'--work={work_name}',
+        f'--workdir={BUILD_DIR}',
+        f'-P{BUILD_DIR}',
+        f'{top_module}',
+    ]
+    logger.debug(f"[CMD] {' '.join(cmd)}")
+    subprocess.run(cmd, check=True)
+
+
+def run_ghdl_simulate(cpu_name, top_module, work_lib: str | None = None):
+    """Executar simulação VHDL com GHDL -r."""
+    logger.info('Running simulation with GHDL (-r)...')
+    work_name = work_lib or cpu_name
+    cmd = [
+        'ghdl',
+        '-r',
+        '--std=08',
+        f'--work={work_name}',
         f'--workdir={BUILD_DIR}',
         f'-P{BUILD_DIR}',
         f'{top_module}',
@@ -343,45 +363,61 @@ def process_vhdl(
     for vhdl_file in vhdl_files:
         logger.debug(f' - {vhdl_file}')
     
-    # Read all VHDL files and extract entity declaration
+    # Read all VHDL files and extract the full entity declaration.
     header_lines = []
-    all_lines = []
     found_entity = False
-    inside_entity = False
-    counter = 0
     
     for vhdl_file in vhdl_files:
         try:
             with open(vhdl_file, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
                 lines = content.splitlines()
-                all_lines.extend(lines)
-                
-                # Look for entity declaration
+
+                # Look for the entity block directly in the file content so the
+                # full generic/port declaration is preserved.
+                normalized = re.sub(r'--.*$', '', content, flags=re.MULTILINE)
                 entity_pattern = re.compile(
-                    rf'^\s*entity\s+{re.escape(top_module)}\s+is\b',
-                    re.IGNORECASE | re.MULTILINE
+                    rf'\bentity\s+{re.escape(top_module)}\s+is\b',
+                    re.IGNORECASE,
                 )
-                
-                for line in lines:
-                    if entity_pattern.match(line):
-                        found_entity = True
-                        inside_entity = True
-                    
-                    if inside_entity:
-                        header_lines.append(line)
-                        if 'end' in line.lower() and (
-                            'entity' in line.lower() or ';' in line
-                        ):
-                            inside_entity = False
-                            counter = 0
-                        elif counter >= context:
+                entity_match = entity_pattern.search(normalized)
+                if not entity_match:
+                    continue
+
+                port_match = re.search(
+                    r'\bport\s*\(', normalized[entity_match.end() :], re.IGNORECASE
+                )
+                if not port_match:
+                    logger.warning(
+                        f'Entity {top_module} found in {vhdl_file}, but no port block was located'
+                    )
+                    continue
+
+                port_start = entity_match.end() + port_match.end()
+                depth = 1
+                port_end = None
+
+                for index in range(port_start, len(normalized)):
+                    char = normalized[index]
+                    if char == '(':
+                        depth += 1
+                    elif char == ')':
+                        depth -= 1
+                        if depth == 0:
+                            port_end = index
                             break
-                        else:
-                            counter += 1
-                
-                if found_entity:
-                    break
+
+                if port_end is None:
+                    logger.warning(
+                        f'Entity {top_module} found in {vhdl_file}, but the port block was not closed'
+                    )
+                    continue
+
+                header_lines = [
+                    normalized[entity_match.start() : port_end + 1].strip()
+                ]
+                found_entity = True
+                break
         except Exception as e:
             logger.warning(f'Error reading {vhdl_file}: {e}')
             continue
@@ -408,13 +444,47 @@ def simulate_to_check(
     include_flags: list[str],
     output_dir: str = 'outputs',
     second_memory: bool = False,
+    is_vhdl: bool = False,
 ):
-    logging.info('Compilando e executando simulação com Verilator...')
+    if is_vhdl:
+        logging.info('Compilando e executando simulação com GHDL...')
+    else:
+        logging.info('Compilando e executando simulação com Verilator...')
 
     current_dir = os.getcwd()
+    if is_vhdl:
+        top_module_file = os.path.join(current_dir, output_dir, f'{cpu_name}.vhd')
+        rendered_verification_top = os.path.join(BUILD_DIR, 'verification_top.vhd')
+        os.makedirs(BUILD_DIR, exist_ok=True)
+
+        env = Environment(loader=FileSystemLoader(INTERNAL_DIR))
+        template = env.get_template('verification_top.vhd')
+        rendered_text = template.render(
+            {
+                'second_memory': second_memory,
+            }
+        )
+        rendered_text = rendered_text.replace(
+            '"/eda/processor_ci_connector/internal/memory.hex"',
+            f'"{os.path.join(INTERNAL_DIR, "memory.hex")}"',
+        )
+        with open(rendered_verification_top, 'w', encoding='utf-8') as file:
+            file.write(rendered_text)
+
+        simulation_files = list(files_list)
+        simulation_files.append(str(top_module_file))
+        simulation_files += [
+            os.path.join(INTERNAL_DIR, 'memory.vhd'),
+            rendered_verification_top,
+            os.path.join(INTERNAL_DIR, 'verification_tb.vhd'),
+        ]
+
+        run_ghdl_import(cpu_name, simulation_files, work_lib='work')
+        run_ghdl_elaborate(cpu_name, 'verification_tb', work_lib='work')
+        run_ghdl_simulate(cpu_name, 'verification_tb', work_lib='work')
+        return
 
     top_module_file = f'{output_dir}/{cpu_name}.sv'
-
     top_module_file = os.path.join(current_dir, top_module_file)
 
     files_list.append(str(top_module_file))

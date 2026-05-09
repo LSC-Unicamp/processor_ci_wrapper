@@ -4,19 +4,24 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
+{{ use_clauses }}
+-- Common work library packages for Potato and similar cores
+use work.pp_types.all;
+use work.pp_utilities.all;
+
 entity processorci_top is
   generic (
-    CLK_FREQ            : natural := {{ CLOCK_FREQ }};
-    BIT_RATE            : natural := {{ BIT_RATE }};
-    PAYLOAD_BITS        : natural := {{ PAYLOAD_BITS }};
-    BUFFER_SIZE         : natural := {{ BUFFER_SIZE }};
-    PULSE_CONTROL_BITS   : natural := {{ PULSE_CONTROL_BITS }};
-    BUS_WIDTH           : natural := {{ BUS_WIDTH }};
-    WORD_SIZE_BY        : natural := {{ WORD_SIZE_BY }};
-    ID                  : natural := {{ ID }};
-    RESET_CLK_CYCLES    : natural := {{ RESET_CLK_CYCLES }};
-    MEMORY_FILE         : string  := {{ MEMORY_FILE }};
-    MEMORY_SIZE         : natural := {{ MEMORY_SIZE }};
+    CLK_FREQ            : natural := 50000000;
+    BIT_RATE            : natural := 115200;
+    PAYLOAD_BITS        : natural := 8;
+    BUFFER_SIZE         : natural := 8;
+    PULSE_CONTROL_BITS  : natural := 1;
+    BUS_WIDTH           : natural := 32;
+    WORD_SIZE_BY        : natural := 4;
+    ID                  : natural := 0;
+    RESET_CLK_CYCLES    : natural := 0;
+    MEMORY_FILE         : string  := "";
+    MEMORY_SIZE         : natural := 4096;
     PIPELINED_WISHBONE  : boolean := false
   );
   port (
@@ -67,11 +72,13 @@ end entity processorci_top;
 
 architecture rtl of processorci_top is
 
+  {{ component_declarations }}
+
   signal clk_core : std_logic;
   signal rst_core : std_logic;
 
 {% if not simulation %}
-  -- Fios do barramento entre Controller e Processor
+  -- Wishbone bus signals (non-simulation mode)
   signal core_cyc       : std_logic;
   signal core_stb       : std_logic;
   signal core_we        : std_logic;
@@ -93,12 +100,12 @@ architecture rtl of processorci_top is
 {% endif %}
 {% endif %}
 
-  signal _core_data_in : std_logic_vector(31 downto 0);
-  signal _core_ack     : std_logic;
+  signal core_data_in_mux : std_logic_vector(31 downto 0);
+  signal core_ack_mux     : std_logic;
 
 {% if second_memory %}
-  signal _data_mem_data_in : std_logic_vector(31 downto 0);
-  signal _data_mem_ack     : std_logic;
+  signal data_mem_data_in_mux : std_logic_vector(31 downto 0);
+  signal data_mem_ack_mux     : std_logic;
 {% endif %}
 
 begin
@@ -170,19 +177,19 @@ begin
     begin
       if rising_edge(clk_core) then
         if rst_core = '1' then
-          _core_ack     <= '0';
-          _core_data_in <= (others => '0');
+          core_ack_mux     <= '0';
+          core_data_in_mux <= (others => '0');
         else
-          _core_ack     <= core_ack;
-          _core_data_in <= core_data_in;
+          core_ack_mux     <= core_ack;
+          core_data_in_mux <= core_data_in;
         end if;
       end if;
     end process;
   end generate;
 
   p_core_passthrough : if not PIPELINED_WISHBONE generate
-    _core_ack     <= core_ack;
-    _core_data_in <= core_data_in;
+    core_ack_mux     <= core_ack;
+    core_data_in_mux <= core_data_in;
   end generate;
 
 {% if second_memory %}
@@ -191,19 +198,19 @@ begin
     begin
       if rising_edge(clk_core) then
         if rst_core = '1' then
-          _data_mem_ack     <= '0';
-          _data_mem_data_in <= (others => '0');
+          data_mem_ack_mux     <= '0';
+          data_mem_data_in_mux <= (others => '0');
         else
-          _data_mem_ack     <= data_mem_ack;
-          _data_mem_data_in <= data_mem_data_in;
+          data_mem_ack_mux     <= data_mem_ack;
+          data_mem_data_in_mux <= data_mem_data_in;
         end if;
       end if;
     end process;
   end generate;
 
   p_data_mem_passthrough : if not PIPELINED_WISHBONE generate
-    _data_mem_ack     <= data_mem_ack;
-    _data_mem_data_in <= data_mem_data_in;
+    data_mem_ack_mux     <= data_mem_ack;
+    data_mem_data_in_mux <= data_mem_data_in;
   end generate;
 {% endif %}
 

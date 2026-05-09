@@ -146,7 +146,7 @@ def build_wrapper(
     logging.info('Generating instance...')
 
     if is_vhdl:
-        instance, assign_list, create_signals = generate_instance_vhdl(
+        instance, assign_list, create_signals, component_declarations, use_clauses = generate_instance_vhdl(
             header,
             connections,
             second_memory=second_memory,
@@ -166,7 +166,7 @@ def build_wrapper(
 
     generate_wrapper(
         processor,
-        instance,
+        (instance, assign_list, create_signals, component_declarations, use_clauses) if is_vhdl else instance,
         interface_and_ports['bus_type'],
         second_memory,
         output,
@@ -183,6 +183,7 @@ def build_wrapper(
         include_flags,
         output,
         second_memory=second_memory,
+        is_vhdl=is_vhdl,
     )
 
 
