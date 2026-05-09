@@ -18,6 +18,12 @@ from core.bus_defines import (
     axi4_data_adapter,
     axi4_lite_adapter,
     axi4_lite_data_adapter,
+    ahb_adapter_vhd,
+    ahb_data_adapter_vhd,
+    axi4_lite_adapter_vhd,
+    axi4_lite_data_adapter_vhd,
+    axi4_adapter_vhd,
+    axi4_data_adapter_vhd,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,8 +108,8 @@ def parse_parameters(params_block: str):
     return params
 
 
-def _split_top_level_commas(s: str):
-    """Divide por vírgulas de nível superior (ignora vírgulas dentro de colchetes/parênteses/strings)."""
+def _split_top_level_separators(s: str, separator: str = ','):
+    """Divide por separadores de nível superior (ignora conteúdo aninhado e strings)."""
     parts, cur = [], []
     depth_paren = depth_brack = 0
     in_squote = in_dquote = esc = False
@@ -143,7 +149,7 @@ def _split_top_level_commas(s: str):
             depth_paren = max(0, depth_paren - 1)
             cur.append(ch)
             continue
-        if ch == ',' and depth_brack == 0 and depth_paren == 0:
+        if ch == separator and depth_brack == 0 and depth_paren == 0:
             part = ''.join(cur).strip()
             if part:
                 parts.append(part)
@@ -154,6 +160,53 @@ def _split_top_level_commas(s: str):
     if last:
         parts.append(last)
     return parts
+
+
+def _split_top_level_commas(s: str):
+    return _split_top_level_separators(s, ',')
+
+
+def _split_top_level_semicolons(s: str):
+    return _split_top_level_separators(s, ';')
+
+
+def _extract_vhdl_entity_ports_block(code: str, entity_name: str | None = None):
+    """Localiza `entity ... is` e extrai o bloco do `port(...)` correspondente."""
+    normalized = re.sub(r'--.*$', '', code, flags=re.MULTILINE)
+
+    if entity_name:
+        entity_pattern = re.compile(
+            rf'\bentity\s+{re.escape(entity_name)}\s+is\b', re.IGNORECASE
+        )
+    else:
+        entity_pattern = re.compile(
+            r'\bentity\s+([A-Za-z_]\w*)\s+is\b', re.IGNORECASE
+        )
+
+    entity_match = entity_pattern.search(normalized)
+    if not entity_match:
+        return None, None
+
+    if entity_name is None:
+        entity_name = entity_match.group(1)
+
+    port_match = re.search(r'\bport\s*\(', normalized[entity_match.end() :], re.IGNORECASE)
+    if not port_match:
+        return entity_name, None
+
+    port_start = entity_match.end() + port_match.end()
+    depth = 1
+
+    for index in range(port_start, len(normalized)):
+        char = normalized[index]
+        if char == '(':
+            depth += 1
+        elif char == ')':
+            depth -= 1
+            if depth == 0:
+                return entity_name, normalized[port_start:index]
+
+    return entity_name, None
 
 
 def generate_instance(
@@ -477,6 +530,229 @@ def generate_instance(
     return '\n'.join(lines), '\n'.join(assign_list), '\n'.join(create_list)
 
 
+def generate_instance_vhdl(
+    code: str,
+    mapping: dict,
+    second_memory: bool = False,
+    instance_name: str = 'u_processor',
+    use_adapter: bool = False,
+):
+    """
+    Generates a VHDL component instantiation from an entity declaration.
+    
+    Args:
+        code: VHDL entity code (entity ... port (...) ...)
+        mapping: Port mapping dictionary
+        second_memory: Whether dual memory is enabled
+        instance_name: Instance name for the component
+        use_adapter: Whether bus adapters are used
+    
+    Returns:
+        tuple: (instance_code, signal_assignments, signal_declarations, component_declarations, use_clauses)
+    """
+    # Extract 'use' clauses (e.g. use work.pp_types.all;) from entity code
+    use_clauses = []
+    use_matches = re.findall(r'^\s*use\s+([A-Za-z_]\w*\.[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*;\s*$', code, re.MULTILINE | re.IGNORECASE)
+    for use_match in use_matches:
+        use_clauses.append(f'use {use_match};')
+    use_clauses_str = '\n'.join(use_clauses)
+    
+    # Locate entity ... port ( ... ) using a permissive parser that tolerates
+    # comments and VHDL formatting variations.
+    entity_name, ports_block = _extract_vhdl_entity_ports_block(code)
+    if not entity_name or ports_block is None:
+        raise ValueError(
+            'Unable to locate VHDL entity declaration (entity ... port (...) ...)'
+        )
+
+    ports_block = ports_block or ''
+    
+    # Parse VHDL generics (if present) and ports
+    generics = []
+    gen_match = re.search(r'\bgeneric\s*\((.*?)\)\s*;', code, re.DOTALL | re.IGNORECASE)
+    if gen_match:
+        gen_block = gen_match.group(1)
+        # split top-level semicolon-separated generic entries
+        gen_chunks = _split_top_level_semicolons(gen_block)
+        for g in gen_chunks:
+            gm = re.match(r'\s*([A-Za-z_]\w*)\s*:\s*(.+)', g.strip())
+            if gm:
+                gname = gm.group(1)
+                gtypeval = gm.group(2).strip().rstrip(';')
+                generics.append((gname, gtypeval))
+
+    # Parse VHDL ports — store full type string, not just width
+    ports = []
+    chunks = _split_top_level_semicolons(ports_block)
+    current_dir = None
+    
+    for chunk in chunks:
+        s = chunk.strip()
+        if not s:
+            continue
+        
+        # Match VHDL port syntax: name : direction type
+        # Example: clk : in std_logic;
+        # Example: data : out std_logic_vector(31 downto 0);
+        port_match = re.match(
+            r'^\s*([A-Za-z_]\w*)\s*:\s*(in|out|inout)\b\s+(.+)$',
+            s,
+            re.IGNORECASE,
+        )
+        if port_match:
+            name = port_match.group(1)
+            direction = port_match.group(2).lower()
+            type_str = port_match.group(3).strip().rstrip(';')
+            
+            # Extract bit width from type string for heuristic defaults later
+            # std_logic => width 1
+            # std_logic_vector(31 downto 0) => width 32
+            width = 1
+            if 'vector' in type_str.lower():
+                vec_match = re.search(
+                    r'\((\d+)\s+downto\s+(\d+)\)',
+                    type_str,
+                    re.IGNORECASE,
+                )
+                if vec_match:
+                    msb = int(vec_match.group(1))
+                    lsb = int(vec_match.group(2))
+                    width = abs(msb - lsb) + 1
+            
+            # Store: (direction, name, width, type_string)
+            ports.append((direction, name, width, type_str))
+    
+    # Apply same signal mapping logic as Verilog
+    controller_signals_non_open = CONTROLLER_SIGNALS_NON_OPEN
+    if second_memory:
+        controller_signals_non_open.update(DATA_MEM_SIGNALS_NON_OPEN)
+    
+    assign_list = []
+    create_list = []
+    created_signals = set()
+    
+    # Generate component declaration and port map
+    port_names = [p[1] for p in ports]
+    max_port_len = max((len(p) for p in port_names), default=0)
+    
+    # Build component declaration using exact type strings from entity
+    comp_lines = []
+    comp_lines.append(f'component {entity_name} is')
+    if generics:
+        comp_lines.append('  generic (')
+        for i, (gname, gtypeval) in enumerate(generics):
+            comma = ';' if i != len(generics) - 1 else ''
+            comp_lines.append(f'    {gname} : {gtypeval}{comma}')
+        comp_lines.append('  );')
+    comp_lines.append('  port (')
+    for i, (direction, port, width, type_str) in enumerate(ports):
+        comma = ';' if i != len(ports) - 1 else ''
+        # Use exact type string from entity
+        comp_lines.append(f'    {port} : {direction} {type_str}{comma}')
+    comp_lines.append('  );')
+    comp_lines.append(f'end component;')
+
+    # Build instantiation using component
+    lines = []
+    lines.append(f'{instance_name} : {entity_name}')
+    # Do not emit a generic map by default. Component declares generics with defaults.
+    lines.append('  port map (')
+    
+    for i, (direction, port, width, type_str) in enumerate(ports):
+        conn = ''
+        is_last = i == len(ports) - 1
+
+        def zero_literal(port_width: int) -> str:
+            if port_width > 1:
+                return f"(others => '0')"
+            return "'0'"
+        
+        # Clock detection
+        if direction == 'in' and ('clk' in port.lower() or 'clock' in port.lower()):
+            conn = 'clk_core'
+        # Reset detection
+        elif direction == 'in' and (
+            'rst_n' in port.lower()
+            or 'reset_n' in port.lower()
+            or 'rstn' in port.lower()
+            or 'resetn' in port.lower()
+            or 'nrst' in port.lower()
+            or 'nreset' in port.lower()
+            or 'rstb' in port.lower()
+            or 'resetb' in port.lower()
+            or 'brst' in port.lower()
+            or 'breset' in port.lower()
+            or 'rst_b' in port.lower()
+            or 'reset_b' in port.lower()
+            or 'rstz' in port.lower()
+            or 'resetz' in port.lower()
+            or 'zrst' in port.lower()
+            or 'zreset' in port.lower()
+            or 'rst_z' in port.lower()
+            or 'reset_z' in port.lower()
+        ):
+            conn = 'not rst_core'
+        elif direction == 'in' and (
+            'rst' in port.lower() or 'reset' in port.lower()
+        ):
+            conn = 'rst_core'
+        elif port in mapping:
+            if mapping[port] is None or mapping[port] == '' or mapping[port] == 'null':
+                conn = ''
+            else:
+                conn = str(mapping[port])
+        elif direction == 'in':
+            pl = port.lower()
+            # Wishbone input signal mapping (for simulation)
+            wb_input_mapping = {
+                'wb_dat_in': 'core_data_in',
+                'wb_ack_in': 'core_ack',
+            }
+            if port in wb_input_mapping:
+                conn = wb_input_mapping[port]
+            elif 'dbg_' in pl or 'trace_' in pl or 'trc_' in pl or 'jtag' in pl:
+                conn = 'open'
+            elif (
+                pl.endswith('_en')
+                or pl.endswith('_valid')
+                or 'poweron' in pl
+                or 'start_' in pl
+            ):
+                conn = "'1'" if width <= 1 else f"(others => '1')"
+            else:
+                conn = zero_literal(width)
+        else:
+            # For outputs in simulation mode, map Wishbone/-like signals to wrapper ports
+            wb_mapping = {
+                'wb_adr_out': 'core_addr',
+                'wb_sel_out': 'core_sel',
+                'wb_cyc_out': 'core_cyc',
+                'wb_stb_out': 'core_stb',
+                'wb_we_out': 'core_we',
+                'wb_dat_out': 'core_data_out',
+                'wb_dat_in': 'core_data_in',
+                'wb_ack_in': 'core_ack',
+            }
+            if port in wb_mapping:
+                conn = wb_mapping[port]
+            else:
+                conn = ''
+        
+        if conn:
+            comma = ',' if not is_last else ' '
+            lines.append(f'    {port:<{max_port_len}} => {conn}{comma}')
+        else:
+            comma = ',' if not is_last else ' '
+            lines.append(f'    {port:<{max_port_len}} => open{comma}')
+    
+    lines.append('  );')
+
+    component_declarations = '\n'.join(comp_lines)
+    instance_code = '\n'.join(lines)
+
+    return instance_code, '', '', component_declarations, use_clauses_str
+
+
 def generate_wrapper(
     cpu_name: str,
     instance_code: str,
@@ -485,45 +761,78 @@ def generate_wrapper(
     output_dir='outputs',
     signal_mappings: str = '',
     create_signals: str = '',
+    is_vhdl: bool = False,
 ):
     env = Environment(loader=FileSystemLoader(TEMPLATES_DIR))
-    template = env.get_template('wrapper.j2')
+    
+    # Choose template based on HDL type
+    template_name = 'wrapper_vhdl.j2' if is_vhdl else 'wrapper_sv.j2'
+    template = env.get_template(template_name)
 
-    logger.info(f'Bus type: {bus_type}, Second memory: {second_memory}')
+    logger.info(f'Bus type: {bus_type}, Second memory: {second_memory}, HDL: {"VHDL" if is_vhdl else "SystemVerilog"}')
 
     adapter = ''
 
-    if bus_type == 'AHB':
-        adapter = ahb_adapter
-        if second_memory:
-            adapter += '\n' + ahb_data_adapter
-    elif bus_type == 'AXI':
-        adapter = axi4_adapter
-        if second_memory:
-            adapter += '\n' + axi4_data_adapter
-    elif bus_type == 'AXI-Lite':
-        adapter = axi4_lite_adapter
-        if second_memory:
-            adapter += '\n' + axi4_lite_data_adapter
-    # elif bus_type == 'Avalon':
-    #     adapter = avalon_adapter
-    #     if second_memory:
-    #         adapter += '\n' + avalon_data_adapter
+    if is_vhdl:
+        # Select VHDL adapters
+        if bus_type == 'AHB':
+            adapter = ahb_adapter_vhd
+            if second_memory:
+                adapter += '\n' + ahb_data_adapter_vhd
+        elif bus_type == 'AXI':
+            adapter = axi4_adapter_vhd
+            if second_memory:
+                adapter += '\n' + axi4_data_adapter_vhd
+        elif bus_type == 'AXI-Lite':
+            adapter = axi4_lite_adapter_vhd
+            if second_memory:
+                adapter += '\n' + axi4_lite_data_adapter_vhd
+    else:
+        # Select Verilog adapters
+        if bus_type == 'AHB':
+            adapter = ahb_adapter
+            if second_memory:
+                adapter += '\n' + ahb_data_adapter
+        elif bus_type == 'AXI':
+            adapter = axi4_adapter
+            if second_memory:
+                adapter += '\n' + axi4_data_adapter
+        elif bus_type == 'AXI-Lite':
+            adapter = axi4_lite_adapter
+            if second_memory:
+                adapter += '\n' + axi4_lite_data_adapter
+
+    # instance_code may be a tuple when VHDL: (instance, assign_list, create_signals, component_declarations, use_clauses)
+    component_declarations = ''
+    use_clauses = ''
+    processor_instance = instance_code
+    if is_vhdl and isinstance(instance_code, tuple):
+        # Unpack: instance_code, assign_list, create_signals, component_declarations, use_clauses
+        processor_instance = instance_code[0]
+        if len(instance_code) > 3:
+            component_declarations = instance_code[3]
+        if len(instance_code) > 4:
+            use_clauses = instance_code[4]
 
     output = template.render(
         {
-            'processor_instance': instance_code,
+            'simulation': is_vhdl,
+            'processor_instance': processor_instance,
             'bus_type': bus_type,
             'second_memory': second_memory,
             'bus_adapter': adapter,
             'signal_mappings': signal_mappings,
             'create_signals': create_signals,
+            'component_declarations': component_declarations,
+            'use_clauses': use_clauses,
         }
     )
 
     os.makedirs(output_dir, exist_ok=True)
 
-    output_path = f'{output_dir}/{cpu_name}.sv'
+    # Choose output extension based on HDL type
+    output_ext = 'vhd' if is_vhdl else 'sv'
+    output_path = f'{output_dir}/{cpu_name}.{output_ext}'
 
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(output)

@@ -4,9 +4,12 @@ import json
 import logging
 from core import send_prompt
 from core.prompts import (
-    wishbone_prompt,
-    ahb_prompt,
-    axi_prompt,
+    wishbone_prompt_verilog,
+    ahb_prompt_verilog,
+    axi_prompt_verilog,
+    wishbone_prompt_vhdl,
+    ahb_prompt_vhdl,
+    axi_prompt_vhdl,
     find_interface_prompt,
 )
 
@@ -88,8 +91,18 @@ def filter_connections_from_response(response):
 
 
 def connect_interfaces(
-    interface_info, processor_interface, model='qwen2.5:32b'
+    interface_info, processor_interface, model='qwen2.5:32b', is_vhdl=False
 ):
+    # Select prompts based on HDL type
+    if is_vhdl:
+        wishbone_prompt = wishbone_prompt_vhdl
+        ahb_prompt = ahb_prompt_vhdl
+        axi_prompt = axi_prompt_vhdl
+    else:
+        wishbone_prompt = wishbone_prompt_verilog
+        ahb_prompt = ahb_prompt_verilog
+        axi_prompt = axi_prompt_verilog
+
     if interface_info['bus_type'] == 'Wishbone':
         prompt = wishbone_prompt.format(
             processor_interface=processor_interface,
@@ -106,7 +119,7 @@ def connect_interfaces(
             memory_interface=interface_info['memory_interface'],
         )
     else:
-        logger.debug('Defaulting to Wishbone.')
+        logging.debug('Defaulting to Wishbone.')
         prompt = wishbone_prompt.format(
             processor_interface=processor_interface,
             memory_interface=interface_info['memory_interface'],
@@ -179,7 +192,7 @@ def filter_processor_interface_from_response(response: str) -> str:
     return True, filtered
 
 
-def extract_interface_and_memory_ports(core_declaration, model='qwen2.5:32b'):
+def extract_interface_and_memory_ports(core_declaration, model='qwen2.5:32b', is_vhdl=False):
 
     prompt = find_interface_prompt.format(core_declaration=core_declaration)
 

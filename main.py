@@ -4,16 +4,33 @@ import json
 import colorlog
 import logging
 import argparse
-from core.hdl_process import process_verilog, simulate_to_check
+from core.hdl_process import process_verilog, process_vhdl, simulate_to_check
 from core.interface_resolve import (
     extract_interface_and_memory_ports,
     connect_interfaces,
 )
-from core.make_wrapper import generate_instance, generate_wrapper
+from core.make_wrapper import generate_instance, generate_instance_vhdl, generate_wrapper
 from core.order_files import _order_sv_files, _order_vhdl_files
 
 DEFAULT_CONFIG_PATH = '/eda/processor_ci/config'
 PROCESSOR_CI_PATH = os.getenv('PROCESSOR_CI_PATH', '/eda/processor_ci')
+
+
+def detect_hdl_type(files: list[str]) -> str:
+    """
+    Detect if the project is VHDL or Verilog based on file extensions.
+    Returns 'vhdl' or 'verilog'.
+    """
+    has_vhdl = any(f.endswith(('.vhd', '.vhdl')) for f in files)
+    has_verilog = any(f.endswith(('.sv', '.v', '.vh')) for f in files)
+    
+    # If both types present, VHDL takes precedence (as it's the conversion target)
+    if has_vhdl:
+        return 'vhdl'
+    elif has_verilog:
+        return 'verilog'
+    else:
+        return 'verilog'  # default
 
 
 def build_wrapper(
@@ -37,19 +54,34 @@ def build_wrapper(
     include_dirs = config_data.get('include_dirs', [])
     top_module = config_data.get('top_module', processor)
 
+    # Detect HDL type early
+    is_vhdl = detect_hdl_type(files) == 'vhdl'
+    logging.info(f'Detected HDL type: {"VHDL" if is_vhdl else "Verilog"}')
+
     logging.info('Processing HDL code...')
 
-    header, other_files, include_flags, files = process_verilog(
-        processor,
-        top_module,
-        files,
-        include_dirs,
-        processor_path,
-        context=context,
-        convert_to_verilog2005=convert,
-        format_code=format,
-        get_files_in_project=True,
-    )
+    if is_vhdl:
+        header, other_files, include_flags, files = process_vhdl(
+            processor,
+            top_module,
+            files,
+            include_dirs,
+            processor_path,
+            context=context,
+            get_files_in_project=True,
+        )
+    else:
+        header, other_files, include_flags, files = process_verilog(
+            processor,
+            top_module,
+            files,
+            include_dirs,
+            processor_path,
+            context=context,
+            convert_to_verilog2005=convert,
+            format_code=format,
+            get_files_in_project=True,
+        )
 
     files = [os.path.relpath(f, start=processor_path) for f in files]
     files = set(files + config_data.get('files'))
@@ -79,7 +111,7 @@ def build_wrapper(
         tentativas += 1
         logging.debug(f'Attempt {tentativas} of 3...')
         ok, interface_and_ports = extract_interface_and_memory_ports(
-            header, model
+            header, model, is_vhdl=is_vhdl
         )
 
     if tentativas == 3 and not ok:
@@ -96,7 +128,7 @@ def build_wrapper(
     while connections is None and tentativas < 3:
         tentativas += 1
         logging.debug(f'Attempt {tentativas} of 3...')
-        connections = connect_interfaces(interface_and_ports, header, model)
+        connections = connect_interfaces(interface_and_ports, header, model, is_vhdl=is_vhdl)
 
     if tentativas == 3 and connections is None:
         logging.error('Error parsing JSON')
@@ -113,24 +145,34 @@ def build_wrapper(
 
     logging.info('Generating instance...')
 
-    instance, assign_list, create_signals = generate_instance(
-        header,
-        connections,
-        second_memory=second_memory,
-        instance_name='Processor',
-        use_adapter=use_adapter,
-    )
+    if is_vhdl:
+        instance, assign_list, create_signals, component_declarations, use_clauses = generate_instance_vhdl(
+            header,
+            connections,
+            second_memory=second_memory,
+            instance_name='u_processor',
+            use_adapter=use_adapter,
+        )
+    else:
+        instance, assign_list, create_signals = generate_instance(
+            header,
+            connections,
+            second_memory=second_memory,
+            instance_name='Processor',
+            use_adapter=use_adapter,
+        )
 
     logging.info('Generating wrapper...')
 
     generate_wrapper(
         processor,
-        instance,
+        (instance, assign_list, create_signals, component_declarations, use_clauses) if is_vhdl else instance,
         interface_and_ports['bus_type'],
         second_memory,
         output,
         assign_list,
         create_signals,
+        is_vhdl=is_vhdl,
     )
 
     logging.info('Starting simulation for verification...')
@@ -141,6 +183,7 @@ def build_wrapper(
         include_flags,
         output,
         second_memory=second_memory,
+        is_vhdl=is_vhdl,
     )
 
 

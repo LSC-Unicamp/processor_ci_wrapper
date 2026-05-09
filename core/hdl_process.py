@@ -4,19 +4,21 @@ import subprocess
 import logging
 from core import BUILD_DIR, INTERNAL_DIR
 from core.defines import KEYWORDS
+from jinja2 import Environment, FileSystemLoader
 
 
 logger = logging.getLogger(__name__)
 
 
-def run_ghdl_import(cpu_name, vhdl_files):
+def run_ghdl_import(cpu_name, vhdl_files, work_lib: str | None = None):
     """Importar todos os arquivos VHDL com GHDL -i."""
     logger.info('Importing VHDL files with GHDL (-i)...')
+    work_name = work_lib or cpu_name
     cmd = [
         'ghdl',
         '-i',
         '--std=08',
-        f'--work={cpu_name}',
+        f'--work={work_name}',
         f'--workdir={BUILD_DIR}',
         f'-P{BUILD_DIR}',
     ] + list(map(str, vhdl_files))
@@ -24,14 +26,32 @@ def run_ghdl_import(cpu_name, vhdl_files):
     subprocess.run(cmd, check=True)
 
 
-def run_ghdl_elaborate(cpu_name, top_module):
+def run_ghdl_elaborate(cpu_name, top_module, work_lib: str | None = None):
     """Elaborar com GHDL -m."""
     logger.info('Elaborating project with GHDL (-m)...')
+    work_name = work_lib or cpu_name
     cmd = [
         'ghdl',
         '-m',
         '--std=08',
-        f'--work={cpu_name}',
+        f'--work={work_name}',
+        f'--workdir={BUILD_DIR}',
+        f'-P{BUILD_DIR}',
+        f'{top_module}',
+    ]
+    logger.debug(f"[CMD] {' '.join(cmd)}")
+    subprocess.run(cmd, check=True)
+
+
+def run_ghdl_simulate(cpu_name, top_module, work_lib: str | None = None):
+    """Executar simulação VHDL com GHDL -r."""
+    logger.info('Running simulation with GHDL (-r)...')
+    work_name = work_lib or cpu_name
+    cmd = [
+        'ghdl',
+        '-r',
+        '--std=08',
+        f'--work={work_name}',
         f'--workdir={BUILD_DIR}',
         f'-P{BUILD_DIR}',
         f'{top_module}',
@@ -299,19 +319,172 @@ def process_verilog(
     return header_str, other_files, include_flags, files
 
 
+def process_vhdl(
+    cpu_name: str,
+    top_module: str,
+    files: list[str],
+    include_dirs: list[str],
+    processor_path,
+    context: int = 20,
+    get_files_in_project: bool = False,
+):
+    """
+    Process VHDL files by extracting the entity header without conversion to Verilog.
+    
+    Args:
+        cpu_name: Processor name
+        top_module: Top entity name
+        files: List of VHDL file paths
+        include_dirs: List of include directories (mostly unused for VHDL)
+        processor_path: Root path to processor source
+        context: Number of context lines after entity declaration
+        get_files_in_project: Whether to search for files in the project
+    
+    Returns:
+        tuple: (header_str, vhdl_files, [], files)
+    """
+    vhdl_files = []
+    
+    os.makedirs(BUILD_DIR, exist_ok=True)
+    
+    for file_rel in files:
+        src_file = os.path.join(processor_path, file_rel)
+        if not os.path.exists(src_file):
+            logger.warning(f'File not found: {src_file}')
+            continue
+        if file_rel.strip().split('.')[-1].lower() in ['vhdl', 'vhd']:
+            vhdl_files.append(str(src_file))
+    
+    if not vhdl_files:
+        logger.warning('No VHDL files found')
+        return '', [], [], []
+    
+    logger.debug('Found VHDL files:')
+    for vhdl_file in vhdl_files:
+        logger.debug(f' - {vhdl_file}')
+    
+    # Read all VHDL files and extract the full entity declaration.
+    header_lines = []
+    found_entity = False
+    
+    for vhdl_file in vhdl_files:
+        try:
+            with open(vhdl_file, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+                lines = content.splitlines()
+
+                # Look for the entity block directly in the file content so the
+                # full generic/port declaration is preserved.
+                normalized = re.sub(r'--.*$', '', content, flags=re.MULTILINE)
+                entity_pattern = re.compile(
+                    rf'\bentity\s+{re.escape(top_module)}\s+is\b',
+                    re.IGNORECASE,
+                )
+                entity_match = entity_pattern.search(normalized)
+                if not entity_match:
+                    continue
+
+                port_match = re.search(
+                    r'\bport\s*\(', normalized[entity_match.end() :], re.IGNORECASE
+                )
+                if not port_match:
+                    logger.warning(
+                        f'Entity {top_module} found in {vhdl_file}, but no port block was located'
+                    )
+                    continue
+
+                port_start = entity_match.end() + port_match.end()
+                depth = 1
+                port_end = None
+
+                for index in range(port_start, len(normalized)):
+                    char = normalized[index]
+                    if char == '(':
+                        depth += 1
+                    elif char == ')':
+                        depth -= 1
+                        if depth == 0:
+                            port_end = index
+                            break
+
+                if port_end is None:
+                    logger.warning(
+                        f'Entity {top_module} found in {vhdl_file}, but the port block was not closed'
+                    )
+                    continue
+
+                header_lines = [
+                    normalized[entity_match.start() : port_end + 1].strip()
+                ]
+                found_entity = True
+                break
+        except Exception as e:
+            logger.warning(f'Error reading {vhdl_file}: {e}')
+            continue
+    
+    if not found_entity:
+        logger.warning(f'Entity {top_module} not found in VHDL files')
+        return '', vhdl_files, [], vhdl_files
+    
+    header_str = '\n'.join(header_lines)
+    
+    files_found = []
+    if get_files_in_project:
+        # For VHDL, just return the processed files
+        files_found = vhdl_files
+    
+    logger.debug(f'Extracted VHDL entity header:\n{header_str}')
+    
+    return header_str, vhdl_files, [], files_found
+
+
 def simulate_to_check(
     cpu_name: str,
     files_list: list[str],
     include_flags: list[str],
     output_dir: str = 'outputs',
     second_memory: bool = False,
+    is_vhdl: bool = False,
 ):
-    logging.info('Compilando e executando simulação com Verilator...')
+    if is_vhdl:
+        logging.info('Compilando e executando simulação com GHDL...')
+    else:
+        logging.info('Compilando e executando simulação com Verilator...')
 
     current_dir = os.getcwd()
+    if is_vhdl:
+        top_module_file = os.path.join(current_dir, output_dir, f'{cpu_name}.vhd')
+        rendered_verification_top = os.path.join(BUILD_DIR, 'verification_top.vhd')
+        os.makedirs(BUILD_DIR, exist_ok=True)
+
+        env = Environment(loader=FileSystemLoader(INTERNAL_DIR))
+        template = env.get_template('verification_top.vhd')
+        rendered_text = template.render(
+            {
+                'second_memory': second_memory,
+            }
+        )
+        rendered_text = rendered_text.replace(
+            '"/eda/processor_ci_connector/internal/memory.hex"',
+            f'"{os.path.join(INTERNAL_DIR, "memory.hex")}"',
+        )
+        with open(rendered_verification_top, 'w', encoding='utf-8') as file:
+            file.write(rendered_text)
+
+        simulation_files = list(files_list)
+        simulation_files.append(str(top_module_file))
+        simulation_files += [
+            os.path.join(INTERNAL_DIR, 'memory.vhd'),
+            rendered_verification_top,
+            os.path.join(INTERNAL_DIR, 'verification_tb.vhd'),
+        ]
+
+        run_ghdl_import(cpu_name, simulation_files, work_lib='work')
+        run_ghdl_elaborate(cpu_name, 'verification_tb', work_lib='work')
+        run_ghdl_simulate(cpu_name, 'verification_tb', work_lib='work')
+        return
 
     top_module_file = f'{output_dir}/{cpu_name}.sv'
-
     top_module_file = os.path.join(current_dir, top_module_file)
 
     files_list.append(str(top_module_file))
