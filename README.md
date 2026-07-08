@@ -1,15 +1,15 @@
-# Processor CI Connector
+# ProcessorCI Wrapper
 
-Welcome to the **Processor CI Connector**.
+Welcome to the **ProcessorCI Wrapper**.
 
-The **Processor CI Connector** is a tool for processor connection and integration.
+The **Processor CI Wrapper** is a tool for processor connection and integration.
 Given a RISC-V processor, it can pre-process its source code, extract its instance, and establish a connection with the **Processor CI Wrapper**, automating part of the continuous integration flow.
 
 ---
 
 ## Dependencies
 
-For proper operation of the Processor CI Connector, the following dependencies are required:
+For proper operation of the ProcessorCI Wrapper, the following dependencies are required:
 
 * Verilator
 * Python 3.8 or newer
@@ -31,7 +31,7 @@ pip install -r requirements.txt
 
 ## Usage
 
-The **Processor CI Connector** is a command-line tool with an integrated parser.
+The **ProcessorCI Wrapper** is a command-line tool with an integrated parser.
 All available options can be displayed with the following command:
 
 ```bash
@@ -58,9 +58,9 @@ export SERVER_URL="<your server url and port>"
 
 ---
 
-## Processor CI Configuration File
+## ProcessorCI Configuration File
 
-The **Processor CI Connector** requires a valid **Processor CI** JSON configuration file to operate correctly.
+The **ProcessorCI Wrapper** requires a valid **Processor CI** JSON configuration file to operate correctly.
 By default, the connector searches for this file in the directory:
 
 ```
