@@ -1,98 +1,100 @@
 # ProcessorCI Wrapper
 
-Welcome to the **ProcessorCI Wrapper**.
+ProcessorCI Wrapper generates and assists with processor wrapper integration.
+Given a processor repository and a ProcessorCI configuration, it can inspect HDL
+source, order files, resolve interfaces, and produce wrapper code that connects
+the processor to ProcessorCI verification and test infrastructure.
 
-The **Processor CI Wrapper** is a tool for processor connection and integration.
-Given a RISC-V processor, it can pre-process its source code, extract its instance, and establish a connection with the **Processor CI Wrapper**, automating part of the continuous integration flow.
+## Repository Layout
 
----
-
-## Dependencies
-
-For proper operation of the ProcessorCI Wrapper, the following dependencies are required:
-
-* Verilator
-* Python 3.8 or newer
-* Pip
-* Python Venv
-* Ollama API
-
----
+```text
+core/             Wrapper generation and HDL processing helpers
+internal/         ProcessorCI bus adapters, memory models, and test assets
+templates/        Jinja templates for SystemVerilog and VHDL wrappers
+main.py           CLI entrypoint
+run-all.sh        Batch helper script
+docs/             Layout and maintenance notes
+requirements.txt  Python dependencies
+```
 
 ## Installation
 
-To install the project dependencies, run:
-
 ```bash
+git clone https://github.com/LSC-Unicamp/processor_ci_wrapper.git
+cd processor_ci_wrapper
+python3 -m venv env
+. env/bin/activate
 pip install -r requirements.txt
 ```
 
----
+External dependencies may include:
 
-## Usage
+- Python 3.8 or newer.
+- Verilator or other HDL tools for validation-oriented workflows.
+- OLLAMA when model-assisted interface resolution is enabled.
 
-The **ProcessorCI Wrapper** is a command-line tool with an integrated parser.
-All available options can be displayed with the following command:
+## Inputs
+
+The wrapper flow uses:
+
+- Processor name.
+- Path to the processor repository.
+- ProcessorCI JSON configuration directory.
+- Optional LLM model name.
+- Optional `SERVER_URL` environment variable for a remote OLLAMA server.
+
+By default, configs are searched under `/eda/processor_ci/config`. Override this
+with `-c`.
+
+## Quick Start
+
+Show all options:
 
 ```bash
 python main.py --help
 ```
 
-### Typical usage example
-
-A standard execution is performed using:
+Generate or assist a wrapper for a processor:
 
 ```bash
-python main.py -p <Processor Name> -P <Path to processor repository> -m <LLM Model>
+python main.py \
+  -p <processor_name> \
+  -P /path/to/processor/repository \
+  -c /path/to/config/folder \
+  -m <ollama_model>
 ```
 
----
-
-## Ollama Server Configuration
-
-If a local **Ollama** server is not available, you can configure the remote server address by exporting the `SERVER_URL` environment variable:
+Use a remote OLLAMA server:
 
 ```bash
-export SERVER_URL="<your server url and port>"
+export SERVER_URL="http://server:port"
+python main.py -p <processor_name> -P /path/to/repo -m <ollama_model>
 ```
 
----
+## Outputs
 
-## ProcessorCI Configuration File
+Outputs depend on the selected mode and processor language. The main generated
+artifacts are wrapper files derived from:
 
-The **ProcessorCI Wrapper** requires a valid **Processor CI** JSON configuration file to operate correctly.
-By default, the connector searches for this file in the directory:
+- `templates/wrapper_sv.j2`
+- `templates/wrapper_vhdl.j2`
 
-```
-/eda/processor_ci/config
-```
+The generated wrapper should connect the processor core to ProcessorCI memory,
+clock, reset, and bus interfaces. Review generated code before using it in CI.
 
-This path can be modified using the `-c` flag:
+## Development
 
-```bash
-python main.py -c <Path to config folder>
-```
+Keep `main.py` as the public CLI entrypoint. Implementation changes should live
+under `core/`, and reusable HDL/template assets should stay under `internal/` or
+`templates/`.
 
----
-
-## Documentation and Support
-
-The official documentation is available at:
-[https://processorci.lsc.ic.unicamp.br](https://processorci.lsc.ic.unicamp.br)
-
-Questions, suggestions, and issue reports can be submitted in the **Issues** section of the GitHub repository.
-Contributions are welcome, and all Pull Requests will be reviewed and merged whenever possible.
-
----
+See [docs/README.md](docs/README.md) for more notes about data boundaries.
 
 ## Contributing
 
-To contribute improvements or fixes, please refer to the contribution guidelines available in:
-[CONTRIBUTING.md](./CONTRIBUTING.md)
-
----
+Issues and pull requests are welcome. Include a small processor/config example
+when changing interface resolution or generated wrapper structure.
 
 ## License
 
-This project is licensed under the [MIT License](./LICENSE), granting full freedom for use, modification, and distribution.
-
+This project is licensed under the [MIT License](LICENSE).
