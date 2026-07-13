@@ -62,6 +62,7 @@ module axi4_to_wishbone_simple #(
     // Registradores internos
     logic [ADDR_WIDTH-1:0] addr_reg;
     logic [DATA_WIDTH-1:0] wdata_reg;
+    logic [DATA_WIDTH-1:0] rdata_reg;
     logic [(DATA_WIDTH/8)-1:0] wstrb_reg;
     logic [ID_WIDTH-1:0] id_reg;
     logic is_write;
@@ -83,7 +84,7 @@ module axi4_to_wishbone_simple #(
 
         AXI_RVALID  = 0;
         AXI_RRESP   = 2'b00;
-        AXI_RDATA   = WB_RDATA;
+        AXI_RDATA   = (state == WB_READ_RESP) ? rdata_reg : WB_RDATA;
         AXI_RID     = id_reg;
 
         WB_CYC  = 0;
@@ -146,9 +147,13 @@ module axi4_to_wishbone_simple #(
         if (!rst_n) begin
             addr_reg <= 0;
             wdata_reg <= 0;
+            rdata_reg <= 0;
             wstrb_reg <= 0;
             id_reg <= 0;
         end else begin
+            if (state == WB_READ && WB_ACK) begin
+                rdata_reg <= WB_RDATA;
+            end
             if (state == IDLE) begin
                 if (AXI_AWVALID && AXI_WVALID) begin
                     addr_reg  <= AXI_AWADDR;

@@ -42,6 +42,7 @@ def build_wrapper(
     output: str,
     convert: bool,
     format: bool,
+    override_hdl_type: bool = False
 ) -> None:
     logging.info('Reading processor configuration...')
 
@@ -55,8 +56,12 @@ def build_wrapper(
     top_module = config_data.get('top_module', processor)
 
     # Detect HDL type early
-    is_vhdl = detect_hdl_type(files) == 'vhdl'
-    logging.info(f'Detected HDL type: {"VHDL" if is_vhdl else "Verilog"}')
+    if override_hdl_type:
+        is_vhdl = False
+        logging.info('Override: Forcing SystemVerilog as HDL type.')
+    else:
+        is_vhdl = detect_hdl_type(files) == 'vhdl'
+        logging.info(f'Detected HDL type: {"VHDL" if is_vhdl else "Verilog"}')
 
     logging.info('Processing HDL code...')
 
@@ -252,6 +257,13 @@ def main() -> None:
         action='store_true',
         help='Format code to a human-readable style using Verible',
     )
+    parser.add_argument(
+        '-sv',
+        '--system_verilog',
+        type=bool,
+        default=True,
+        help='Overrides the VHDL detection and forces the use of SystemVerilog',
+    )
 
     args = parser.parse_args()
 
@@ -285,6 +297,7 @@ def main() -> None:
         output=args.output,
         convert=args.convert_to_verilog2005,
         format=args.format_code,
+        override_hdl_type=args.system_verilog
     )
 
 

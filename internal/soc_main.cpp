@@ -41,6 +41,7 @@ int main(int argc, char **argv, char **env) {
         top->clk = !top->clk;
         top->eval();
         trace->dump(i * CLOCK_PERIOD);
+        Verilated::timeInc(CLOCK_PERIOD);
     }
     top->rst_n = 1;
     
@@ -72,6 +73,7 @@ int main(int argc, char **argv, char **env) {
         }
 
         trace->dump(i * CLOCK_PERIOD);
+        Verilated::timeInc(CLOCK_PERIOD);
     }
     
     trace->close();
