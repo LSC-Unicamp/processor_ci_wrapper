@@ -51,7 +51,7 @@ def build_wrapper(
     with open(config_path, 'r', encoding='utf-8') as file:
         config_data = json.load(file)
 
-    files = config_data.get('files', [])
+    files = config_data.get('files') or config_data.get('sim_files') or []
     include_dirs = config_data.get('include_dirs', [])
     top_module = config_data.get('top_module', processor)
     extra_flags = config_data.get('extra_flags', [])
@@ -92,7 +92,8 @@ def build_wrapper(
         )
 
     files = [os.path.relpath(f, start=processor_path) for f in files]
-    files = set(files + config_data.get('files'))
+    config_files = config_data.get('files') or config_data.get('sim_files') or []
+    files = set(files + config_files)
     # check if files are verilog or vhdl
     if any(f.endswith('.vhd') or f.endswith('.vhdl') for f in files):
         files = [f for f in files if f.endswith('.vhd') or f.endswith('.vhdl')]
