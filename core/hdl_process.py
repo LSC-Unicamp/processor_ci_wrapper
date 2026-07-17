@@ -464,41 +464,47 @@ def run_ghdl_import(cpu_name, vhdl_files, work_lib: str | None = None):
     subprocess.run(cmd, check=True)
 
 
-def run_ghdl_elaborate(cpu_name, top_module, work_lib: str | None = None):
+def run_ghdl_elaborate(cpu_name, top_module, work_lib: str | None = None, extra_flags: list[str] | None = None):
     """Elaborar com GHDL -m."""
     logger.info('Elaborating project with GHDL (-m)...')
     work_name = work_lib or cpu_name
+    print(f'Extra flags: {extra_flags}')
     cmd = [
         'ghdl',
         '-m',
         '--std=08',
+        *(extra_flags or []),
         f'--work={work_name}',
         f'--workdir={BUILD_DIR}',
         f'-P{BUILD_DIR}',
-        f'{top_module}',
+        f'{top_module}', 
     ]
+    print(f'Command: {" ".join(cmd)}')
     logger.debug(f"[CMD] {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
 
 
-def run_ghdl_simulate(cpu_name, top_module, work_lib: str | None = None):
+def run_ghdl_simulate(cpu_name, top_module, work_lib: str | None = None, extra_flags: list[str] | None = None):
     """Executar simulação VHDL com GHDL -r."""
     logger.info('Running simulation with GHDL (-r)...')
     work_name = work_lib or cpu_name
+    print(f'Extra flags: {extra_flags}')
     cmd = [
         'ghdl',
         '-r',
         '--std=08',
+        *(extra_flags or []),
         f'--work={work_name}',
         f'--workdir={BUILD_DIR}',
         f'-P{BUILD_DIR}',
         f'{top_module}',
     ]
+    print(f'Command: {" ".join(cmd)}')
     logger.debug(f"[CMD] {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
 
 
-def synthesize_to_verilog(cpu_name, output_file, top_module):
+def synthesize_to_verilog(cpu_name, output_file, top_module, extra_flags: list[str]):
     """Sintetizar o VHDL com GHDL para Verilog."""
     logger.info(f'Synthesizing {cpu_name} to Verilog...')
     cmd = [
@@ -506,6 +512,7 @@ def synthesize_to_verilog(cpu_name, output_file, top_module):
         'synth',
         '--latches',
         '--std=08',
+        *(extra_flags or []),
         f'--work={cpu_name}',
         f'--workdir={BUILD_DIR}',
         f'-P{BUILD_DIR}',
@@ -517,10 +524,10 @@ def synthesize_to_verilog(cpu_name, output_file, top_module):
         subprocess.run(cmd, stdout=f, check=True)
 
 
-def convert_to_verilog(cpu_name, vhdl_files, top_module, output_file):
+def convert_to_verilog(cpu_name, vhdl_files, top_module, output_file, extra_flags: list[str] | None = None):
     run_ghdl_import(cpu_name, vhdl_files)
-    run_ghdl_elaborate(cpu_name, top_module)
-    synthesize_to_verilog(cpu_name, output_file, top_module)
+    run_ghdl_elaborate(cpu_name, top_module, extra_flags=extra_flags)
+    synthesize_to_verilog(cpu_name, output_file, top_module, extra_flags=extra_flags)
 
 
 def search_files(text_lines: str, files: list[str]):
@@ -604,6 +611,7 @@ def process_verilog(
     top_module: str,
     files: list[str],
     include_dirs: list[str],
+    extra_flags: list[str],
     processor_path,
     context: int = 20,
     convert_to_verilog2005: bool = False,
@@ -637,6 +645,7 @@ def process_verilog(
             vhdl_files,
             top_module,
             verilog_output,
+            extra_flags=extra_flags,
         )
 
         other_files.append(str(verilog_output))
@@ -681,6 +690,7 @@ def process_verilog(
         '-Wno-UNUSED',
         *other_files,
         *include_flags,
+        *((extra_flags or []) if not vhdl_files else []),
     ]
 
     # Executa o comando e captura a saída
@@ -762,6 +772,7 @@ def process_vhdl(
     top_module: str,
     files: list[str],
     include_dirs: list[str],
+    extra_flags: list[str],
     processor_path,
     context: int = 20,
     get_files_in_project: bool = False,

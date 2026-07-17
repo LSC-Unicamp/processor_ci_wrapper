@@ -54,6 +54,7 @@ def build_wrapper(
     files = config_data.get('files', [])
     include_dirs = config_data.get('include_dirs', [])
     top_module = config_data.get('top_module', processor)
+    extra_flags = config_data.get('extra_flags', [])
 
     # Detect HDL type early
     if override_hdl_type:
@@ -71,6 +72,7 @@ def build_wrapper(
             top_module,
             files,
             include_dirs,
+            extra_flags,
             processor_path,
             context=context,
             get_files_in_project=True,
@@ -81,6 +83,7 @@ def build_wrapper(
             top_module,
             files,
             include_dirs,
+            extra_flags,
             processor_path,
             context=context,
             convert_to_verilog2005=convert,
@@ -260,8 +263,7 @@ def main() -> None:
     parser.add_argument(
         '-sv',
         '--system_verilog',
-        type=bool,
-        default=True,
+        action='store_true',
         help='Overrides the VHDL detection and forces the use of SystemVerilog',
     )
 
