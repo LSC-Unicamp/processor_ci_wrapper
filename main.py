@@ -51,6 +51,11 @@ def build_wrapper(
     with open(config_path, 'r', encoding='utf-8') as file:
         config_data = json.load(file)
 
+    # Source and include paths are later consumed from the build directory.
+    # Keep them absolute so a relative CLI path does not change meaning when
+    # the simulation subprocess selects a different working directory.
+    processor_path = os.path.abspath(processor_path)
+
     files = config_data.get('files') or config_data.get('sim_files') or []
     include_dirs = config_data.get('include_dirs', [])
     top_module = config_data.get('top_module', processor)
@@ -102,6 +107,15 @@ def build_wrapper(
         files = [f for f in files if f.endswith('.sv') or f.endswith('.v')]
         files = _order_sv_files(files, repo_root=processor_path)
 
+    # Validation must use the complete, dependency-ordered list computed above.
+    # Passing ``other_files`` here discarded discovered dependencies and also
+    # bypassed the ordering pass, making otherwise-correct configs fail only at
+    # the final simulation stage.
+    simulation_files = [
+        path if os.path.isabs(path) else os.path.join(processor_path, path)
+        for path in files
+    ]
+
     # Save processed files in config json with relative paths
     config_data['files'] = files
     with open(config_path, 'w', encoding='utf-8') as file:
@@ -132,7 +146,9 @@ def build_wrapper(
     logging.info('Connecting interfaces...')
 
     tentativas = 0
-    connections = None
+    connections = config_data.get('connections')
+    if connections is not None:
+        logging.info('Using deterministic interface connections from config.')
 
     while connections is None and tentativas < 3:
         tentativas += 1
@@ -161,6 +177,7 @@ def build_wrapper(
             second_memory=second_memory,
             instance_name='u_processor',
             use_adapter=use_adapter,
+            generic_overrides=config_data.get('generic_map', {}),
         )
     else:
         instance, assign_list, create_signals = generate_instance(
@@ -188,11 +205,12 @@ def build_wrapper(
 
     simulate_to_check(
         processor,
-        other_files,
+        simulation_files,
         include_flags,
         output,
         second_memory=second_memory,
         is_vhdl=is_vhdl,
+        extra_flags=extra_flags,
     )
 
 

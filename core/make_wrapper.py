@@ -29,6 +29,60 @@ from core.bus_defines import (
 logger = logging.getLogger(__name__)
 
 
+VHDL_WRAPPER_SIGNAL_WIDTHS = {
+    'core_cyc': 1,
+    'core_stb': 1,
+    'core_we': 1,
+    'core_sel': 4,
+    'core_addr': 32,
+    'core_data_out': 32,
+    'core_data_in': 32,
+    'core_ack': 1,
+    'data_mem_cyc': 1,
+    'data_mem_stb': 1,
+    'data_mem_we': 1,
+    'data_mem_sel': 4,
+    'data_mem_addr': 32,
+    'data_mem_data_out': 32,
+    'data_mem_data_in': 32,
+    'data_mem_ack': 1,
+}
+
+
+def _vhdl_literal(expression) -> str:
+    """Translate simple Verilog/JSON constants into legal VHDL."""
+    value = str(expression).strip()
+    if value in {'0', '1'}:
+        return f"'{value}'"
+    binary = re.fullmatch(r"(\d+)'[bB]([01xXzZ_]+)", value)
+    if binary:
+        bits = binary.group(2).replace('_', '').upper()
+        return f'"{bits}"' if len(bits) > 1 else f"'{bits}'"
+    return value
+
+
+def _vhdl_assignment(target: str, expression) -> str:
+    """Render a legal VHDL assignment, including LLM-style case mappings."""
+    value = str(expression).strip()
+    case_match = re.fullmatch(r'case\s+([A-Za-z_]\w*)\s+(.+)', value, re.DOTALL)
+    if case_match:
+        selector = case_match.group(1)
+        branches = re.findall(
+            r'when\s+(.+?)\s*=>\s*(.+?)(?:;|$)',
+            case_match.group(2),
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if branches:
+            choices = [
+                f'  {_vhdl_literal(result.strip())} when {choice.strip()}'
+                for choice, result in branches
+            ]
+            return f'with {selector} select\n{target} <=\n' + ',\n'.join(choices) + ';'
+    if value in {'0', '1'} and VHDL_WRAPPER_SIGNAL_WIDTHS.get(target, 1) > 1:
+        return f"{target} <= (others => '{value}');"
+    return f'{target} <= {_vhdl_literal(value)};'
+
+
 def is_identifier(tok):
     return bool(re.match(r'^[A-Za-z_]\w*$', tok))
 
@@ -170,6 +224,76 @@ def _split_top_level_semicolons(s: str):
     return _split_top_level_separators(s, ';')
 
 
+def _extract_balanced_parentheses(text: str, open_index: int):
+    """Return the text inside a balanced parenthesized block and its end."""
+    if open_index >= len(text) or text[open_index] != '(':
+        return None, None
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(open_index, len(text)):
+        char = text[index]
+        if escaped:
+            escaped = False
+            continue
+        if char == '\\' and in_string:
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char == '(':
+            depth += 1
+        elif char == ')':
+            depth -= 1
+            if depth == 0:
+                return text[open_index + 1:index], index + 1
+    return None, None
+
+
+def _extract_verilog_module_header(code: str):
+    """Extract a module name plus balanced parameter and port blocks."""
+    module_match = re.search(r'\bmodule\s+([A-Za-z_]\w*)', code)
+    if not module_match:
+        return None
+
+    module_name = module_match.group(1)
+    cursor = module_match.end()
+
+    # SystemVerilog permits package imports between the module name and #(...).
+    while True:
+        cursor_match = re.match(r'\s*', code[cursor:])
+        cursor += cursor_match.end()
+        if not re.match(r'import\b', code[cursor:]):
+            break
+        semicolon = code.find(';', cursor)
+        if semicolon == -1:
+            return None
+        cursor = semicolon + 1
+
+    cursor_match = re.match(r'\s*', code[cursor:])
+    cursor += cursor_match.end()
+    params_block = ''
+    if cursor < len(code) and code[cursor] == '#':
+        cursor += 1
+        cursor_match = re.match(r'\s*', code[cursor:])
+        cursor += cursor_match.end()
+        params_block, cursor = _extract_balanced_parentheses(code, cursor)
+        if params_block is None:
+            return None
+
+    cursor_match = re.match(r'\s*', code[cursor:])
+    cursor += cursor_match.end()
+    ports_block, cursor = _extract_balanced_parentheses(code, cursor)
+    if ports_block is None:
+        return None
+
+    return module_name, params_block, ports_block
+
+
 def _extract_vhdl_entity_ports_block(code: str, entity_name: str | None = None):
     """Localiza `entity ... is` e extrai o bloco do `port(...)` correspondente."""
     normalized = re.sub(r'--.*$', '', code, flags=re.MULTILINE)
@@ -227,23 +351,13 @@ def generate_instance(
     - Debug/trace inputs -> 1'b0
     - Saídas/inout sem match -> ()
     """
-    # localizar module <name> #( ... )? ( ... ) ;
-    header_pat = re.compile(
-        r'\bmodule\s+([A-Za-z_]\w*)'  # nome do módulo
-        r'(?:\s+import\s+[^;]+;\s*)*'  # zero ou mais imports
-        r'(?:\s*#\s*\((?P<params>.*?)\)\s*)?'  # bloco opcional de parâmetros #( ... )
-        r'\s*\(\s*(?P<ports>.*?)\s*\)\s*;',  # bloco de portas ( ... );
-        re.DOTALL,
-    )
-    m = header_pat.search(code)
-    if not m:
+    header = _extract_verilog_module_header(code)
+    if not header:
         raise ValueError(
             'Unable to locate module header (module ... #( ... )? ( ... );).'
         )
 
-    module_name = m.group(1)
-    params_block = m.group('params') or ''
-    ports_block = m.group('ports') or ''
+    module_name, params_block, ports_block = header
 
     # -----------------------
     # parse parâmetros (parameter ...)
@@ -278,31 +392,32 @@ def generate_instance(
                 continue
             rest = s
 
-        # Captura range [msb:lsb] e nome da porta
-        # Ex: logic [31:0] data_i, data_j
-        # Regex captura opcional [msb:lsb] e identificador
-        matches = re.findall(r'(\[[^\]]+\])?\s*([A-Za-z_]\w*)', rest)
-        for range_str, name in matches:
-            if name.lower() in TYPE_WORDS:
-                continue
-            # calcula largura
-            if range_str:
-                m = re.match(r'\[(\d+)\s*:\s*(\d+)\]', range_str)
-                if m:
-                    msb = int(m.group(1))
-                    lsb = int(m.group(2))
-                    width = abs(msb - lsb) + 1
-                else:
-                    width = 1
-            else:
-                width = 1
-            ports.append((current_dir, name, width))
+        # Packed dimensions can contain identifiers such as l2_slices_p. They
+        # describe the port type and must not be emitted as additional ports.
+        ranges = re.findall(r'\[[^\]]+\]', rest)
+        declaration_without_ranges = re.sub(r'\[[^\]]+\]', ' ', rest)
+        identifiers = [
+            token
+            for token in re.findall(r'[A-Za-z_]\w*', declaration_without_ranges)
+            if token.lower() not in TYPE_WORDS
+        ]
+        if not identifiers:
+            continue
+        name = identifiers[-1]
+        width = 1
+        for range_str in ranges:
+            width_match = re.fullmatch(r'\[\s*(\d+)\s*:\s*(\d+)\s*\]', range_str)
+            if width_match:
+                msb = int(width_match.group(1))
+                lsb = int(width_match.group(2))
+                width *= abs(msb - lsb) + 1
+        ports.append((current_dir, name, width))
 
     # -----------------------
     # lógica de sinais não mapeados
     # -----------------------
 
-    controller_signals_non_open = CONTROLLER_SIGNALS_NON_OPEN
+    controller_signals_non_open = dict(CONTROLLER_SIGNALS_NON_OPEN)
 
     if second_memory:
         controller_signals_non_open.update(DATA_MEM_SIGNALS_NON_OPEN)
@@ -348,7 +463,7 @@ def generate_instance(
                 and isinstance(mapping['data_mem_cyc'], str)
                 and is_identifier(mapping['data_mem_cyc'])
             ):
-                assign_list.append('assign data_mem_cyc = 1;')
+                assign_list.append('assign data_mem_stb = data_mem_cyc;')
 
         if 'core_cyc' in mapping_keys and 'core_stb' in mapping_keys:
             if (
@@ -358,7 +473,7 @@ def generate_instance(
                 and isinstance(mapping['core_cyc'], str)
                 and is_identifier(mapping['core_cyc'])
             ):
-                assign_list.append('assign core_cyc = 1;')
+                assign_list.append('assign core_stb = core_cyc;')
 
         # caso a llm coloque os mesmos sinais para core e data_mem
         if (
@@ -400,12 +515,13 @@ def generate_instance(
     # -----------------------
     reverse_map = {}
     const_map = {}
+    port_names = [p for (_, p, _) in ports]
 
     for key, val in mapping.items():
         if val is None:
             continue
         if isinstance(val, str) and is_identifier(val):
-            reverse_map[val] = key
+            reverse_map.setdefault(val, []).append(key)
         else:
             if isinstance(key, str) and is_identifier(key):
                 const_map[key] = val
@@ -418,16 +534,18 @@ def generate_instance(
                     created_signals.update(signals_to_create)
                     create_list.append(decl)
 
-                if not key in OUTPUT_SIGNALS:
+                if (
+                    key in PROCESSOR_CI_WISHBONE_SIGNALS
+                    and key not in OUTPUT_SIGNALS
+                ):
                     assign_list.append(f'assign {key} = {val};')
-                else:
+                elif key in OUTPUT_SIGNALS:
                     for s in signals_to_create:
                         assign_list.append(f'assign {s} = _{key};')
 
     # -----------------------
     # gerar instância (formatação alinhada)
     # -----------------------
-    port_names = [p for (_, p, _) in ports]
     max_port_len = max((len(p) for p in port_names), default=0)
     max_param_len = max((len(p[0]) for p in params), default=0)
 
@@ -474,30 +592,31 @@ def generate_instance(
         ):
             conn = 'rst_core'
         elif port in reverse_map:
+            mapped_wrapper = reverse_map[port][0]
             if (
                 direction == 'input'
-                and is_identifier(reverse_map[port])
-                and reverse_map[port] not in PROCESSOR_CI_WISHBONE_SIGNALS
+                and is_identifier(mapped_wrapper)
+                and mapped_wrapper not in PROCESSOR_CI_WISHBONE_SIGNALS
             ):
                 conn = '0'
             elif port in created_signals:
                 conn = port
                 if direction == 'input':
-                    if reverse_map[port] in OUTPUT_SIGNALS:
+                    if mapped_wrapper in OUTPUT_SIGNALS:
                         assign_list.append(
-                            f'assign {port} = _{reverse_map[port]};'
+                            f'assign {port} = _{mapped_wrapper};'
                         )
                     else:
                         assign_list.append(
-                            f'assign {port} = {reverse_map[port]};'
+                            f'assign {port} = {mapped_wrapper};'
                         )
                 else:
-                    assign_list.append(f'assign {reverse_map[port]} = {port};')
+                    assign_list.append(f'assign {mapped_wrapper} = {port};')
             else:
-                if reverse_map[port] in OUTPUT_SIGNALS:
-                    conn = f'_{reverse_map[port]}'
+                if mapped_wrapper in OUTPUT_SIGNALS:
+                    conn = f'_{mapped_wrapper}'
                 else:
-                    conn = reverse_map[port]
+                    conn = mapped_wrapper
         elif port in const_map:
             conn = const_map[port]
         elif port in created_signals:
@@ -536,6 +655,7 @@ def generate_instance_vhdl(
     second_memory: bool = False,
     instance_name: str = 'u_processor',
     use_adapter: bool = False,
+    generic_overrides: dict | None = None,
 ):
     """
     Generates a VHDL component instantiation from an entity declaration.
@@ -571,7 +691,7 @@ def generate_instance_vhdl(
     generics = []
     gen_match = re.search(r'\bgeneric\s*\((.*?)\)\s*;', code, re.DOTALL | re.IGNORECASE)
     if gen_match:
-        gen_block = gen_match.group(1)
+        gen_block = re.sub(r'--[^\n]*', '', gen_match.group(1))
         # split top-level semicolon-separated generic entries
         gen_chunks = _split_top_level_semicolons(gen_block)
         for g in gen_chunks:
@@ -595,12 +715,12 @@ def generate_instance_vhdl(
         # Example: clk : in std_logic;
         # Example: data : out std_logic_vector(31 downto 0);
         port_match = re.match(
-            r'^\s*([A-Za-z_]\w*)\s*:\s*(in|out|inout)\b\s+(.+)$',
+            r'^\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*:\s*'
+            r'(in|out|inout)\b\s+(.+)$',
             s,
             re.IGNORECASE,
         )
         if port_match:
-            name = port_match.group(1)
             direction = port_match.group(2).lower()
             type_str = port_match.group(3).strip().rstrip(';')
             
@@ -619,11 +739,12 @@ def generate_instance_vhdl(
                     lsb = int(vec_match.group(2))
                     width = abs(msb - lsb) + 1
             
-            # Store: (direction, name, width, type_string)
-            ports.append((direction, name, width, type_str))
+            # A declaration may contain multiple names: clk, reset : in ...
+            for name in (part.strip() for part in port_match.group(1).split(',')):
+                ports.append((direction, name, width, type_str))
     
     # Apply same signal mapping logic as Verilog
-    controller_signals_non_open = CONTROLLER_SIGNALS_NON_OPEN
+    controller_signals_non_open = dict(CONTROLLER_SIGNALS_NON_OPEN)
     if second_memory:
         controller_signals_non_open.update(DATA_MEM_SIGNALS_NON_OPEN)
     
@@ -634,6 +755,53 @@ def generate_instance_vhdl(
     # Generate component declaration and port map
     port_names = [p[1] for p in ports]
     max_port_len = max((len(p) for p in port_names), default=0)
+
+    # Connection prompts use wrapper_signal -> processor_port. Preserve the
+    # older processor_port -> expression form as a fallback, but build the
+    # reverse lookup required for component port maps.
+    processor_to_wrapper = {}
+    expression_port_bridges = {}
+    port_details = {name: (direction, width, type_str) for direction, name, width, type_str in ports}
+    for wrapper_signal, processor_signal in mapping.items():
+        if (
+            wrapper_signal in PROCESSOR_CI_WISHBONE_SIGNALS
+            and isinstance(processor_signal, str)
+            and is_identifier(processor_signal)
+            and processor_signal in port_names
+        ):
+            processor_to_wrapper.setdefault(processor_signal, []).append(
+                wrapper_signal
+            )
+        elif (
+            wrapper_signal in PROCESSOR_CI_WISHBONE_SIGNALS
+            and processor_signal not in (None, '', 'null', 'None')
+        ):
+            expression = str(processor_signal)
+            for port_name, (direction, _width, type_str) in port_details.items():
+                if direction != 'out' or not re.search(rf'\b{re.escape(port_name)}\b', expression):
+                    continue
+                bridge = f'{port_name}_processorci_bridge'
+                expression_port_bridges[port_name] = bridge
+                if bridge not in created_signals:
+                    create_list.append(f'  signal {bridge} : {type_str};')
+                    created_signals.add(bridge)
+                expression = re.sub(
+                    rf'\b{re.escape(port_name)}\b', bridge, expression
+                )
+            assign_list.append(_vhdl_assignment(wrapper_signal, expression))
+
+    def wrapper_connection(signal_name: str) -> str:
+        return {
+            'core_data_in': 'core_data_in_mux',
+            'core_ack': 'core_ack_mux',
+            'data_mem_data_in': 'data_mem_data_in_mux',
+            'data_mem_ack': 'data_mem_ack_mux',
+        }.get(signal_name, signal_name)
+
+    for wrapper_signals in processor_to_wrapper.values():
+        primary = wrapper_signals[0]
+        for alias in wrapper_signals[1:]:
+            assign_list.append(f'{alias} <= {primary};')
     
     # Build component declaration using exact type strings from entity
     comp_lines = []
@@ -655,15 +823,26 @@ def generate_instance_vhdl(
     # Build instantiation using component
     lines = []
     lines.append(f'{instance_name} : {entity_name}')
-    # Do not emit a generic map by default. Component declares generics with defaults.
+    generic_overrides = generic_overrides or {}
+    selected_generics = [
+        (name, generic_overrides[name])
+        for name, _declaration in generics
+        if name in generic_overrides
+    ]
+    if selected_generics:
+        lines.append('  generic map (')
+        for index, (name, value) in enumerate(selected_generics):
+            comma = ',' if index != len(selected_generics) - 1 else ''
+            lines.append(f'    {name} => {str(value).lower()}{comma}')
+        lines.append('  )')
     lines.append('  port map (')
     
     for i, (direction, port, width, type_str) in enumerate(ports):
         conn = ''
         is_last = i == len(ports) - 1
 
-        def zero_literal(port_width: int) -> str:
-            if port_width > 1:
+        def zero_literal(port_width: int, port_type: str) -> str:
+            if port_width > 1 or 'vector' in port_type.lower():
                 return f"(others => '0')"
             return "'0'"
         
@@ -696,6 +875,30 @@ def generate_instance_vhdl(
             'rst' in port.lower() or 'reset' in port.lower()
         ):
             conn = 'rst_core'
+        elif port in expression_port_bridges:
+            conn = expression_port_bridges[port]
+        elif port in processor_to_wrapper:
+            mapped_wrapper = processor_to_wrapper[port][0]
+            wrapper_width = VHDL_WRAPPER_SIGNAL_WIDTHS.get(mapped_wrapper)
+            if wrapper_width and width > 1 and width != wrapper_width:
+                bridge = f'{port}_processorci_bridge'
+                conn = bridge
+                if bridge not in created_signals:
+                    create_list.append(f'  signal {bridge} : {type_str};')
+                    created_signals.add(bridge)
+                if direction == 'out':
+                    assign_list.append(
+                        f'{mapped_wrapper} <= std_logic_vector('
+                        f'resize(unsigned({bridge}), {wrapper_width}));'
+                    )
+                elif direction == 'in':
+                    source = wrapper_connection(mapped_wrapper)
+                    assign_list.append(
+                        f'{bridge} <= std_logic_vector('
+                        f'resize(unsigned({source}), {width}));'
+                    )
+            else:
+                conn = wrapper_connection(mapped_wrapper)
         elif port in mapping:
             if mapping[port] is None or mapping[port] == '' or mapping[port] == 'null':
                 conn = ''
@@ -720,7 +923,7 @@ def generate_instance_vhdl(
             ):
                 conn = "'1'" if width <= 1 else f"(others => '1')"
             else:
-                conn = zero_literal(width)
+                conn = zero_literal(width, type_str)
         else:
             # For outputs in simulation mode, map Wishbone/-like signals to wrapper ports
             wb_mapping = {
@@ -750,7 +953,13 @@ def generate_instance_vhdl(
     component_declarations = '\n'.join(comp_lines)
     instance_code = '\n'.join(lines)
 
-    return instance_code, '', '', component_declarations, use_clauses_str
+    return (
+        instance_code,
+        '\n'.join(assign_list),
+        '\n'.join(create_list),
+        component_declarations,
+        use_clauses_str,
+    )
 
 
 def generate_wrapper(

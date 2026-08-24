@@ -173,6 +173,12 @@ def validate_wrapper_simulation(
         )
 
     if is_vhdl:
+        # GHDL stores analyzed design units in *-objXX.cf files. Reusing one
+        # across validations can silently pull a wrapper from an earlier run
+        # into the current work library.
+        for work_file in build_path.glob('*-obj*.cf'):
+            work_file.unlink()
+
         rendered_verification_top = build_path / 'verification_top.vhd'
         rendered_text = _render_vhdl_verification_top(second_memory)
         rendered_text = rendered_text.replace(
@@ -206,6 +212,7 @@ def validate_wrapper_simulation(
                 '--work=work',
                 f'--workdir={build_path}',
                 f'-P{build_path}',
+                *(extra_flags or []),
                 *simulation_files,
             ],
             [
@@ -215,6 +222,7 @@ def validate_wrapper_simulation(
                 '--work=work',
                 f'--workdir={build_path}',
                 f'-P{build_path}',
+                *(extra_flags or []),
                 'verification_tb',
             ],
             [
@@ -224,6 +232,7 @@ def validate_wrapper_simulation(
                 '--work=work',
                 f'--workdir={build_path}',
                 f'-P{build_path}',
+                *(extra_flags or []),
                 'verification_tb',
                 f'--vcd={vcd_path}',
             ],
@@ -324,6 +333,10 @@ def validate_wrapper_simulation(
     if wrapper_include_flag not in effective_include_flags:
         effective_include_flags.append(wrapper_include_flag)
 
+    validation_extra_flags = [
+        flag for flag in (extra_flags or []) if flag not in {'--lint-only'}
+    ]
+
     verilator_cmd = [
         'verilator',
         '--cc',
@@ -363,7 +376,7 @@ def validate_wrapper_simulation(
         '--quiet',
         '--Mdir',
         'build',
-        *(extra_flags or []),
+        *validation_extra_flags,
         os.path.join(INTERNAL_DIR, 'soc_main.cpp'),
         *simulation_files,
         *effective_include_flags,
@@ -452,6 +465,8 @@ def run_ghdl_import(cpu_name, vhdl_files, work_lib: str | None = None):
     """Importar todos os arquivos VHDL com GHDL -i."""
     logger.info('Importing VHDL files with GHDL (-i)...')
     work_name = work_lib or cpu_name
+    for work_file in Path(BUILD_DIR).glob(f'{work_name.lower()}-obj*.cf'):
+        work_file.unlink()
     cmd = [
         'ghdl',
         '-i',
@@ -523,6 +538,27 @@ def synthesize_to_verilog(cpu_name, output_file, top_module, extra_flags: list[s
     with open(output_file, 'w') as f:
         subprocess.run(cmd, stdout=f, check=True)
 
+    # GHDL preserves VHDL instance labels in its Verilog output. Labels such
+    # as ``reg`` are legal VHDL but reserved Verilog keywords, producing text
+    # that Verilator cannot parse. Rename only identifiers in the syntactic
+    # module-instance position: <module_type> <instance_name> (.
+    synthesized = Path(output_file).read_text(encoding='utf-8')
+    reserved_pattern = '|'.join(
+        sorted((re.escape(word) for word in KEYWORDS), key=len, reverse=True)
+    )
+    instance_pattern = re.compile(
+        rf'^(\s*[A-Za-z_]\w*\s+)({reserved_pattern})(\s*\()',
+        flags=re.MULTILINE,
+    )
+    renamed = set(instance_pattern.findall(synthesized))
+    synthesized = instance_pattern.sub(r'\1\2_inst\3', synthesized)
+    Path(output_file).write_text(synthesized, encoding='utf-8')
+    if renamed:
+        logger.info(
+            'Renamed %d synthesized instance label(s) that used Verilog keywords',
+            len(renamed),
+        )
+
 
 def convert_to_verilog(cpu_name, vhdl_files, top_module, output_file, extra_flags: list[str] | None = None):
     run_ghdl_import(cpu_name, vhdl_files)
@@ -569,7 +605,13 @@ def search_files(text_lines: str, files: list[str]):
             elif entity_out:
                 # VHDL entity detected
                 modules.add(entity_out.group(1))
-            elif out and strip[-1] == '(' and not strip[0] == ')':
+            elif out and out.group(1).casefold() not in {
+                'module', 'function', 'task', 'if', 'else', 'for', 'while',
+                'case', 'always', 'always_comb', 'always_ff', 'always_latch',
+            }:
+                # Accept complete one-line instantiations as well as headers
+                # ending in "(". The former is the common style in small RTL
+                # cores and was previously invisible to dependency discovery.
                 modules.add(out.group(1))
 
     found_files = set()
@@ -606,6 +648,38 @@ def search_files(text_lines: str, files: list[str]):
     return sorted(found_files)
 
 
+def discover_verilog_dependencies(
+    preprocessed_lines: list[str], initial_files: list[str], processor_path: str
+) -> list[str]:
+    """Find the transitive HDL dependency closure from module instantiations."""
+    root = Path(processor_path)
+    candidates = [
+        str(path.resolve())
+        for path in root.rglob('*')
+        if path.is_file()
+        and path.suffix.casefold() in {'.v', '.sv', '.vh'}
+        and '.git' not in path.parts
+    ]
+    selected = {str(Path(path).resolve()) for path in initial_files}
+    frontier = list(preprocessed_lines)
+    while frontier:
+        discovered = set(search_files(frontier, candidates)) - selected
+        if not discovered:
+            break
+        selected.update(discovered)
+        frontier = []
+        for path in sorted(discovered):
+            try:
+                frontier.extend(
+                    Path(path).read_text(
+                        encoding='utf-8', errors='ignore'
+                    ).splitlines()
+                )
+            except OSError:
+                continue
+    return sorted(selected)
+
+
 def process_verilog(
     cpu_name: str,
     top_module: str,
@@ -618,6 +692,7 @@ def process_verilog(
     format_code: bool = False,
     get_files_in_project: bool = False,
 ):
+    processor_path = os.path.abspath(processor_path)
     vhdl_files = []
     other_files = []
 
@@ -654,23 +729,25 @@ def process_verilog(
 
     for inc_dir in include_dirs:
         inc_path = os.path.join(processor_path, inc_dir)
-
-        # get all .v and /sv files in the include directory
-        files = []
-
-        # get all first level files
-        for filename in os.listdir(inc_path):
-            if filename.endswith(('.v', '.sv', '.vh')):
-                files.append(os.path.join(inc_path, filename))
-
-        other_files.extend(files)
-
         if os.path.exists(inc_path):
             include_flags.append(f'-I{inc_path}')
         else:
             logger.warning(f'Include directory not found: {inc_path}')
 
+    # Local headers commonly live beside the configured sources. Treat the
+    # checkout root as an implicit include directory without changing configs.
+    root_include_flag = f'-I{processor_path}'
+    if root_include_flag not in include_flags:
+        include_flags.append(root_include_flag)
+
     logger.info('Preprocessing Verilog files with Verilator...')
+
+    # Mode-selection flags such as --lint-only suppress -E output and therefore
+    # cannot be forwarded to the preprocessing phase. They remain available to
+    # the later validation compile.
+    preprocess_extra_flags = [
+        flag for flag in (extra_flags or []) if flag not in {'--lint-only'}
+    ]
 
     verilator_preprocess_cmd = [
         'verilator',
@@ -684,13 +761,15 @@ def process_verilog(
         '-DEN_RVZICSR',
         '--quiet',
         '-Wall',
+        '-Wno-fatal',
+        '-Wno-EOFNEWLINE',
         '-Wno-UNOPTFLAT',
         '-Wno-IMPLICIT',
         '-Wno-TIMESCALEMOD',
         '-Wno-UNUSED',
         *other_files,
         *include_flags,
-        *((extra_flags or []) if not vhdl_files else []),
+        *(preprocess_extra_flags if not vhdl_files else []),
     ]
 
     # Executa o comando e captura a saída
@@ -698,7 +777,20 @@ def process_verilog(
         verilator_preprocess_cmd, capture_output=True, text=True
     )
 
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(
+            proc.returncode,
+            verilator_preprocess_cmd,
+            output=proc.stdout,
+            stderr=proc.stderr,
+        )
+
     output = proc.stdout
+    if not output.strip():
+        raise ValueError(
+            'Verilator preprocessing produced no HDL output: '
+            + ' '.join(verilator_preprocess_cmd)
+        )
 
     if convert_to_verilog2005:
         logger.info('Converting to Verilog 2005 with verilog2verilog...')
@@ -758,11 +850,15 @@ def process_verilog(
         f.write(filtered_output)
 
     header_str = '\n'.join(header_lines)
+    if not header_str.strip():
+        raise ValueError(
+            f'Preprocessed output does not contain top module {top_module!r}'
+        )
 
     files = []
 
     if get_files_in_project:
-        files = search_files(lines, other_files)
+        files = discover_verilog_dependencies(lines, other_files, processor_path)
 
     return header_str, other_files, include_flags, files
 
@@ -792,6 +888,7 @@ def process_vhdl(
     Returns:
         tuple: (header_str, vhdl_files, [], files)
     """
+    processor_path = os.path.abspath(processor_path)
     vhdl_files = []
     
     os.makedirs(BUILD_DIR, exist_ok=True)
@@ -862,8 +959,21 @@ def process_vhdl(
                     )
                     continue
 
+                # Preserve context clauses required by symbolic port types
+                # (for example, ``use work.constants.all``). The wrapper's
+                # component declaration is compiled in a different design
+                # unit and therefore needs those clauses repeated.
+                context_clauses = re.findall(
+                    r'^\s*(?:library|use)\s+[^;]+;',
+                    normalized[: entity_match.start()],
+                    flags=re.IGNORECASE | re.MULTILINE,
+                )
+                entity_declaration = normalized[
+                    entity_match.start() : port_end + 1
+                ].strip()
                 header_lines = [
-                    normalized[entity_match.start() : port_end + 1].strip()
+                    '\n'.join(clause.strip() for clause in context_clauses),
+                    entity_declaration,
                 ]
                 found_entity = True
                 break
@@ -894,6 +1004,7 @@ def simulate_to_check(
     output_dir: str = 'outputs',
     second_memory: bool = False,
     is_vhdl: bool = False,
+    extra_flags: list[str] | None = None,
 ):
     result = validate_wrapper_simulation(
         cpu_name=cpu_name,
@@ -903,17 +1014,22 @@ def simulate_to_check(
         second_memory=second_memory,
         is_vhdl=is_vhdl,
         build_dir=BUILD_DIR,
+        extra_flags=extra_flags,
     )
     if result['status'] == 'pass':
         return True
-    if result['status'] in {'compile_error', 'build_error', 'runtime_error'}:
-        raise subprocess.CalledProcessError(
-            1,
-            result.get('command') or [],
-            output=result.get('stdout_tail', ''),
-            stderr=result.get('stderr_tail', '') or result.get('reason', ''),
-        )
-    return False
+    logger.error(
+        'Wrapper simulation failed during %s (%s):\n%s',
+        result.get('stage', 'unknown'),
+        result.get('status', 'failure'),
+        result.get('reason', 'Unknown simulation error'),
+    )
+    raise subprocess.CalledProcessError(
+        1,
+        result.get('command') or [],
+        output=result.get('stdout_tail', ''),
+        stderr=result.get('stderr_tail', '') or result.get('reason', ''),
+    )
 
     # Legacy implementation kept below for reference; the structured API above
     # now owns the active simulation flow.

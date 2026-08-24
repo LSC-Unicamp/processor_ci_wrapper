@@ -5,9 +5,6 @@ use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
 {{ use_clauses }}
--- Common work library packages for Potato and similar cores
-use work.pp_types.all;
-use work.pp_utilities.all;
 
 entity processorci_top is
   generic (
@@ -107,6 +104,8 @@ architecture rtl of processorci_top is
   signal data_mem_data_in_mux : std_logic_vector(31 downto 0);
   signal data_mem_ack_mux     : std_logic;
 {% endif %}
+
+  {{ create_signals }}
 
 begin
 
@@ -215,8 +214,6 @@ begin
 {% endif %}
 
   -- Core space
-  {{ create_signals }}
-
   {{ bus_adapter }}
 
   {{ processor_instance }}
