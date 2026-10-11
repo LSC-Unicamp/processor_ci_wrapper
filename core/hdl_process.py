@@ -131,6 +131,8 @@ def validate_wrapper_simulation(
     trace_all_writes: bool = False,
     trace_all_transactions: bool = False,
     timeout: int | None = None,
+    vhdl_work_library: str | None = None,
+    vhdl_generics: dict[str, object] | None = None,
 ):
     """Compile and run the ProcessorCI wrapper signature simulation.
 
@@ -181,6 +183,20 @@ def validate_wrapper_simulation(
 
         rendered_verification_top = build_path / 'verification_top.vhd'
         rendered_text = _render_vhdl_verification_top(second_memory)
+        if vhdl_generics:
+            assignments = []
+            for name, value in vhdl_generics.items():
+                if isinstance(value, bool):
+                    rendered_value = str(value).lower()
+                else:
+                    rendered_value = str(value)
+                assignments.append(f'      {name} => {rendered_value}')
+            generic_map = '    generic map (\n' + ',\n'.join(assignments) + '\n    )\n'
+            rendered_text = rendered_text.replace(
+                '  ptop : entity work.processorci_top\n    port map (',
+                '  ptop : entity work.processorci_top\n' + generic_map + '    port map (',
+                1,
+            )
         rendered_text = rendered_text.replace(
             '"/eda/processor_ci_connector/internal/memory.hex"',
             f'"{os.path.join(INTERNAL_DIR, "memory.hex")}"',
@@ -198,14 +214,35 @@ def validate_wrapper_simulation(
         with open(rendered_verification_tb, 'w', encoding='utf-8') as file:
             file.write(tb_text)
 
-        simulation_files = list(files_list) + [
+        harness_files = [
             str(wrapper),
             os.path.join(INTERNAL_DIR, 'memory.vhd'),
             str(rendered_verification_top),
             str(rendered_verification_tb),
         ]
-        commands = [
-            [
+        commands = []
+        if vhdl_work_library and vhdl_work_library.lower() != 'work':
+            commands.append((
+                'compile',
+                [
+                    'ghdl',
+                    '-i',
+                    '--std=08',
+                    f'--work={vhdl_work_library}',
+                    f'--workdir={build_path}',
+                    f'-P{build_path}',
+                    *(extra_flags or []),
+                    *files_list,
+                ],
+            ))
+            simulation_files = harness_files
+        else:
+            simulation_files = list(files_list) + harness_files
+
+        commands.extend([
+            (
+                'compile',
+                [
                 'ghdl',
                 '-i',
                 '--std=08',
@@ -214,8 +251,11 @@ def validate_wrapper_simulation(
                 f'-P{build_path}',
                 *(extra_flags or []),
                 *simulation_files,
-            ],
-            [
+                ],
+            ),
+            (
+                'compile',
+                [
                 'ghdl',
                 '-m',
                 '--std=08',
@@ -224,8 +264,11 @@ def validate_wrapper_simulation(
                 f'-P{build_path}',
                 *(extra_flags or []),
                 'verification_tb',
-            ],
-            [
+                ],
+            ),
+            (
+                'runtime',
+                [
                 'ghdl',
                 '-r',
                 '--std=08',
@@ -235,11 +278,12 @@ def validate_wrapper_simulation(
                 *(extra_flags or []),
                 'verification_tb',
                 f'--vcd={vcd_path}',
-            ],
-        ]
+                ],
+            ),
+        ])
         stdout_all = []
         stderr_all = []
-        for index, cmd in enumerate(commands):
+        for stage, cmd in commands:
             proc = _run_capture(cmd, build_path, env=env, timeout=timeout)
             stdout_all.append(proc.stdout)
             stderr_all.append(proc.stderr)
@@ -247,8 +291,7 @@ def validate_wrapper_simulation(
                 if proc.returncode == 124:
                     status = 'timeout'
                 else:
-                    status = 'compile_error' if index < 2 else 'runtime_error'
-                stage = 'compile' if index < 2 else 'runtime'
+                    status = 'compile_error' if stage == 'compile' else 'runtime_error'
                 return _result(
                     cpu_name,
                     wrapper,
@@ -272,7 +315,7 @@ def validate_wrapper_simulation(
                 'Expected signature found',
                 stdout,
                 '\n'.join(stderr_all),
-                commands[-1],
+                commands[-1][1],
                 vcd_path,
             )
         return _result(
@@ -284,7 +327,7 @@ def validate_wrapper_simulation(
             'Simulation ran but expected signature not found',
             stdout,
             '\n'.join(stderr_all),
-            commands[-1],
+            commands[-1][1],
             vcd_path,
             )
 
@@ -296,6 +339,45 @@ def validate_wrapper_simulation(
         '"processor_ci_connector/internal/memory.hex"',
         f'"{os.path.join(INTERNAL_DIR, "memory.hex")}"',
     )
+
+    wrapper_text = wrapper.read_text(encoding='utf-8', errors='ignore')
+    if re.search(r'\binput\s+(?:logic\s+)?\[31:0\]\s+core_data_in_hi\b', wrapper_text):
+        verification_text = verification_text.replace(
+            'logic [31:0] core_data_in;  // Dados de saída (para leitura)',
+            'logic [31:0] core_data_in;  // Dados de saída (para leitura)\n'
+            'logic [31:0] core_data_in_hi;',
+            1,
+        )
+        verification_text = verification_text.replace(
+            '.core_data_in      (core_data_in),',
+            '.core_data_in      (core_data_in),\n'
+            '    .core_data_in_hi   (core_data_in_hi),',
+            1,
+        )
+        high_memory = '''
+logic high_memory_ack;
+Memory #(
+    .MEMORY_FILE ("processor_ci_connector/internal/memory.hex"),
+    .MEMORY_SIZE (4096)
+) HighInstructionMemory (
+    .clk    (clk),
+    .cyc_i  (core_cyc),
+    .stb_i  (core_stb),
+    .we_i   (1'b0),
+    .sel_i  (4'b1111),
+    .addr_i (core_addr + 32'd4),
+    .data_i (32'b0),
+    .data_o (core_data_in_hi),
+    .ack_o  (high_memory_ack)
+);
+'''
+        verification_text = verification_text.replace(
+            'endmodule', high_memory + '\nendmodule', 1
+        )
+        verification_text = verification_text.replace(
+            '"processor_ci_connector/internal/memory.hex"',
+            f'"{os.path.join(INTERNAL_DIR, "memory.hex")}"',
+        )
 
     has_core_memory_module = False
     for source_file in files_list:
@@ -320,9 +402,12 @@ def validate_wrapper_simulation(
     with open(rendered_memory, 'w', encoding='utf-8') as file:
         file.write(memory_text)
 
+    # Parse the harness before the wrapper. Wrapper-local preprocessor defines
+    # must not silently select which bus the harness monitors; the explicit
+    # validator flags/configuration are authoritative.
     simulation_files = list(files_list) + [
-        str(wrapper),
         str(rendered_verification_top),
+        str(wrapper),
         str(rendered_memory),
         os.path.join(INTERNAL_DIR, 'axi4_to_wishbone.sv'),
         os.path.join(INTERNAL_DIR, 'axi4lite_to_wishbone.sv'),
@@ -461,10 +546,22 @@ def validate_wrapper_simulation(
     )
 
 
+def _ghdl_work_library(cpu_name: str, work_lib: str | None = None) -> str:
+    """Return a basic VHDL identifier suitable for GHDL's work library."""
+    requested = str(work_lib or cpu_name)
+    normalized = re.sub(r'[^A-Za-z0-9_]', '_', requested)
+    normalized = re.sub(r'_+', '_', normalized).strip('_')
+    if not normalized:
+        normalized = 'processor'
+    if not normalized[0].isalpha():
+        normalized = f'processor_{normalized}'
+    return normalized
+
+
 def run_ghdl_import(cpu_name, vhdl_files, work_lib: str | None = None):
     """Importar todos os arquivos VHDL com GHDL -i."""
     logger.info('Importing VHDL files with GHDL (-i)...')
-    work_name = work_lib or cpu_name
+    work_name = _ghdl_work_library(cpu_name, work_lib)
     for work_file in Path(BUILD_DIR).glob(f'{work_name.lower()}-obj*.cf'):
         work_file.unlink()
     cmd = [
@@ -482,7 +579,7 @@ def run_ghdl_import(cpu_name, vhdl_files, work_lib: str | None = None):
 def run_ghdl_elaborate(cpu_name, top_module, work_lib: str | None = None, extra_flags: list[str] | None = None):
     """Elaborar com GHDL -m."""
     logger.info('Elaborating project with GHDL (-m)...')
-    work_name = work_lib or cpu_name
+    work_name = _ghdl_work_library(cpu_name, work_lib)
     print(f'Extra flags: {extra_flags}')
     cmd = [
         'ghdl',
@@ -502,7 +599,7 @@ def run_ghdl_elaborate(cpu_name, top_module, work_lib: str | None = None, extra_
 def run_ghdl_simulate(cpu_name, top_module, work_lib: str | None = None, extra_flags: list[str] | None = None):
     """Executar simulação VHDL com GHDL -r."""
     logger.info('Running simulation with GHDL (-r)...')
-    work_name = work_lib or cpu_name
+    work_name = _ghdl_work_library(cpu_name, work_lib)
     print(f'Extra flags: {extra_flags}')
     cmd = [
         'ghdl',
@@ -528,7 +625,7 @@ def synthesize_to_verilog(cpu_name, output_file, top_module, extra_flags: list[s
         '--latches',
         '--std=08',
         *(extra_flags or []),
-        f'--work={cpu_name}',
+        f'--work={_ghdl_work_library(cpu_name)}',
         f'--workdir={BUILD_DIR}',
         f'-P{BUILD_DIR}',
         '--out=verilog',
@@ -543,6 +640,10 @@ def synthesize_to_verilog(cpu_name, output_file, top_module, extra_flags: list[s
     # that Verilator cannot parse. Rename only identifiers in the syntactic
     # module-instance position: <module_type> <instance_name> (.
     synthesized = Path(output_file).read_text(encoding='utf-8')
+    # GHDL represents undriven VHDL values with a non-Verilog placeholder.
+    # Preserve their unknown semantics using SystemVerilog's unsized unbased
+    # literal so downstream tools can parse the synthesized netlist.
+    synthesized = synthesized.replace('<unassigned>', "'x")
     reserved_pattern = '|'.join(
         sorted((re.escape(word) for word in KEYWORDS), key=len, reverse=True)
     )
