@@ -4,6 +4,10 @@ import json
 import colorlog
 import logging
 import argparse
+import subprocess
+from contextlib import contextmanager
+from pathlib import Path
+from core import BUILD_DIR
 from core.hdl_process import process_verilog, process_vhdl, simulate_to_check
 from core.interface_resolve import (
     extract_interface_and_memory_ports,
@@ -14,6 +18,90 @@ from core.order_files import _order_sv_files, _order_vhdl_files
 
 DEFAULT_CONFIG_PATH = '/eda/processor_ci/config'
 PROCESSOR_CI_PATH = os.getenv('PROCESSOR_CI_PATH', '/eda/processor_ci')
+
+
+def _resolve_patch_path(config_dir: Path, patch_file: str) -> Path:
+    requested = Path(patch_file)
+    candidates = [requested] if requested.is_absolute() else [
+        config_dir.parent / 'comments' / requested,
+        config_dir.parent / requested,
+        config_dir / requested,
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    searched = ', '.join(str(candidate) for candidate in candidates)
+    raise RuntimeError(f'Configured patch not found: {patch_file} (searched: {searched})')
+
+
+def _git_apply(repo_path: Path, *arguments: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ['git', 'apply', *arguments],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@contextmanager
+def temporary_config_patch(config_data: dict, config_dir: Path, processor_path: Path):
+    """Apply a config patch for wrapper generation and restore the checkout."""
+    patch_file = str(config_data.get('patch', '')).strip()
+    if not patch_file:
+        yield
+        return
+
+    patch_path = _resolve_patch_path(config_dir, patch_file)
+    patch_subdir = str(config_data.get('patch_subdir', '')).strip()
+    repo_root = processor_path.resolve()
+    patch_repo = (repo_root / patch_subdir).resolve()
+    try:
+        patch_repo.relative_to(repo_root)
+    except ValueError as error:
+        raise RuntimeError(
+            f'Configured patch_subdir escapes the processor repository: {patch_subdir!r}'
+        ) from error
+    if not patch_repo.is_dir() or not (patch_repo / '.git').exists():
+        raise RuntimeError(f'Patch target is not a Git work tree: {patch_repo}')
+
+    forward = _git_apply(patch_repo, '--check', '--binary', str(patch_path))
+    applied_here = False
+    if forward.returncode == 0:
+        applied = _git_apply(patch_repo, '--binary', str(patch_path))
+        if applied.returncode != 0:
+            raise RuntimeError(
+                f'Failed to apply configured patch {patch_path}: '
+                f'{applied.stderr.strip() or applied.stdout.strip()}'
+            )
+        applied_here = True
+        logging.info('Temporarily applied configured patch: %s', patch_path)
+    else:
+        reverse = _git_apply(
+            patch_repo, '--reverse', '--check', '--binary', str(patch_path)
+        )
+        if reverse.returncode != 0:
+            forward_error = forward.stderr.strip() or forward.stdout.strip()
+            reverse_error = reverse.stderr.strip() or reverse.stdout.strip()
+            raise RuntimeError(
+                f'Configured patch cannot be applied or reversed: {patch_path}. '
+                f'Forward check: {forward_error}. Reverse check: {reverse_error}'
+            )
+        logging.info('Configured patch is already applied: %s', patch_path)
+
+    try:
+        yield
+    finally:
+        if applied_here:
+            restored = _git_apply(
+                patch_repo, '--reverse', '--binary', str(patch_path)
+            )
+            if restored.returncode != 0:
+                raise RuntimeError(
+                    f'Failed to restore repository after wrapper generation: '
+                    f'{restored.stderr.strip() or restored.stdout.strip()}'
+                )
+            logging.info('Restored processor repository after wrapper generation.')
 
 
 def detect_hdl_type(files: list[str]) -> str:
@@ -33,7 +121,60 @@ def detect_hdl_type(files: list[str]) -> str:
         return 'verilog'  # default
 
 
+def run_config_pre_script(config_data: dict, processor_path: Path) -> None:
+    """Run an optional repository preparation command before reading HDL files."""
+    pre_script = str(config_data.get('pre_script', '')).strip()
+    if not pre_script:
+        return
+
+    logging.info('Running configured pre-script: %s', pre_script)
+    result = subprocess.run(
+        ['bash', '-c', pre_script],
+        cwd=processor_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        details = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(
+            f'Configured pre-script failed with status {result.returncode}: '
+            f'{pre_script}. {details}'
+        )
+
+
 def build_wrapper(
+    config: str,
+    processor: str,
+    context: int,
+    model: str,
+    processor_path: str,
+    output: str,
+    convert: bool,
+    format: bool,
+    override_hdl_type: bool = False
+) -> None:
+    config_dir = Path(config).resolve()
+    config_path = config_dir / f'{processor}.json'
+    with open(config_path, 'r', encoding='utf-8') as file:
+        config_data = json.load(file)
+
+    resolved_processor_path = Path(processor_path).resolve()
+    with temporary_config_patch(config_data, config_dir, resolved_processor_path):
+        return _build_wrapper(
+            config=config,
+            processor=processor,
+            context=context,
+            model=model,
+            processor_path=processor_path,
+            output=output,
+            convert=convert,
+            format=format,
+            override_hdl_type=override_hdl_type,
+        )
+
+
+def _build_wrapper(
     config: str,
     processor: str,
     context: int,
@@ -55,18 +196,21 @@ def build_wrapper(
     # Keep them absolute so a relative CLI path does not change meaning when
     # the simulation subprocess selects a different working directory.
     processor_path = os.path.abspath(processor_path)
+    run_config_pre_script(config_data, Path(processor_path))
 
     files = config_data.get('files') or config_data.get('sim_files') or []
     include_dirs = config_data.get('include_dirs', [])
     top_module = config_data.get('top_module', processor)
     extra_flags = config_data.get('extra_flags', [])
 
-    # Detect HDL type early
+    source_is_vhdl = detect_hdl_type(files) == 'vhdl'
+
+    # Detect requested output HDL type early.
     if override_hdl_type:
         is_vhdl = False
         logging.info('Override: Forcing SystemVerilog as HDL type.')
     else:
-        is_vhdl = detect_hdl_type(files) == 'vhdl'
+        is_vhdl = source_is_vhdl
         logging.info(f'Detected HDL type: {"VHDL" if is_vhdl else "Verilog"}')
 
     logging.info('Processing HDL code...')
@@ -99,8 +243,10 @@ def build_wrapper(
     files = [os.path.relpath(f, start=processor_path) for f in files]
     config_files = config_data.get('files') or config_data.get('sim_files') or []
     files = set(files + config_files)
-    # check if files are verilog or vhdl
-    if any(f.endswith('.vhd') or f.endswith('.vhdl') for f in files):
+    # Select simulation inputs according to the requested output mode.  In
+    # particular, ``-sv`` may start from VHDL sources but must validate the
+    # synthesized Verilog returned by ``process_verilog``.
+    if is_vhdl:
         files = [f for f in files if f.endswith('.vhd') or f.endswith('.vhdl')]
         files = _order_vhdl_files(files, repo_root=processor_path)
     else:
@@ -115,6 +261,11 @@ def build_wrapper(
         path if os.path.isabs(path) else os.path.join(processor_path, path)
         for path in files
     ]
+    if not is_vhdl and config_data.get('simulation_use_preprocessed', False):
+        # Large Bender projects can contain several incompatible vendored
+        # revisions with identical module names. The successful preprocessing
+        # pass is their authoritative compilation unit.
+        simulation_files = [os.path.join(BUILD_DIR, f'{processor}_processed.sv')]
 
     # Save processed files in config json with relative paths
     config_data['files'] = files
@@ -123,11 +274,18 @@ def build_wrapper(
 
     logging.debug(f'Extracted header:\n{header}')
 
-    interface_and_ports = None
+    interface_and_ports = (
+        config_data.get('interface_sv', config_data.get('interface'))
+        if not is_vhdl else config_data.get('interface')
+    )
 
     logging.info('Extracting interfaces and memory ports...')
 
-    ok = False
+    ok = isinstance(interface_and_ports, dict) and {
+        'bus_type', 'memory_interface'
+    }.issubset(interface_and_ports)
+    if ok:
+        logging.info('Using deterministic interface metadata from config.')
     tentativas = 0
     # Tenta 3 vezes obter um json valido
     while not ok and tentativas < 3:
@@ -146,7 +304,10 @@ def build_wrapper(
     logging.info('Connecting interfaces...')
 
     tentativas = 0
-    connections = config_data.get('connections')
+    connections = (
+        config_data.get('connections_sv', config_data.get('connections'))
+        if not is_vhdl else config_data.get('connections')
+    )
     if connections is not None:
         logging.info('Using deterministic interface connections from config.')
 
@@ -210,7 +371,8 @@ def build_wrapper(
         output,
         second_memory=second_memory,
         is_vhdl=is_vhdl,
-        extra_flags=extra_flags,
+        extra_flags=(extra_flags if is_vhdl or not source_is_vhdl else [])
+        + config_data.get('simulation_extra_flags', []),
     )
 
 

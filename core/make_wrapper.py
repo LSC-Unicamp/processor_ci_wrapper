@@ -445,7 +445,11 @@ def generate_instance(
                     f'assign {key} = {controller_signals_non_open[key]};'
                 )
             # Sinal fruto de alucinação, não existe na lista de portas
-            elif mapping[key] not in {name for _, name, _ in ports}:
+            elif (
+                isinstance(mapping[key], str)
+                and is_identifier(mapping[key])
+                and mapping[key] not in {name for _, name, _ in ports}
+            ):
                 mapping[key] = None
                 assign_list.append(
                     f'assign {key} = {controller_signals_non_open.get(key, 0)};'
@@ -527,7 +531,9 @@ def generate_instance(
                 const_map[key] = val
                 signals_to_create = get_signals_to_create(val)
                 signals_to_create = [
-                    s for s in signals_to_create if s not in created_signals
+                    s for s in signals_to_create
+                    if s not in created_signals
+                    and s not in PROCESSOR_CI_WISHBONE_SIGNALS
                 ]
                 if signals_to_create:
                     decl = create_signals_to_declare(signals_to_create, ports)
@@ -540,8 +546,7 @@ def generate_instance(
                 ):
                     assign_list.append(f'assign {key} = {val};')
                 elif key in OUTPUT_SIGNALS:
-                    for s in signals_to_create:
-                        assign_list.append(f'assign {s} = _{key};')
+                    assign_list.append(f'assign {key} = {val};')
 
     # -----------------------
     # gerar instância (formatação alinhada)
@@ -562,7 +567,9 @@ def generate_instance(
 
     # portas
     for direction, port, width in ports:
-        if direction == 'input' and (
+        if port in const_map:
+            conn = const_map[port]
+        elif direction == 'input' and (
             'clk' in port.lower() or 'clock' in port.lower()
         ):
             conn = 'clk_core'
@@ -617,8 +624,6 @@ def generate_instance(
                     conn = f'_{mapped_wrapper}'
                 else:
                     conn = mapped_wrapper
-        elif port in const_map:
-            conn = const_map[port]
         elif port in created_signals:
             conn = port
         elif direction == 'input':
