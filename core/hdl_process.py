@@ -134,6 +134,7 @@ def validate_wrapper_simulation(
     vhdl_work_library: str | None = None,
     vhdl_generics: dict[str, object] | None = None,
     memory_file: str | Path | None = None,
+    data_memory_width: int = 32,
 ):
     """Compile and run the ProcessorCI wrapper signature simulation.
 
@@ -143,6 +144,8 @@ def validate_wrapper_simulation(
     ordinary compile/runtime failures.
     """
     current_dir = Path.cwd()
+    if data_memory_width < 32 or data_memory_width % 32:
+        raise ValueError('data_memory_width must be a positive multiple of 32')
     build_path = Path(build_dir or BUILD_DIR).resolve()
     build_path.mkdir(parents=True, exist_ok=True)
     generated_obj_dir = build_path / 'build'
@@ -477,6 +480,7 @@ Memory #(
     ]
     if second_memory:
         verilator_cmd.append('-DENABLE_SECOND_MEMORY')
+        verilator_cmd.append(f'-DRVBENCH_DATA_MEM_WIDTH={data_memory_width}')
 
     compile_proc = _run_capture(verilator_cmd, build_path, env=env, timeout=timeout)
     if compile_proc.returncode != 0:

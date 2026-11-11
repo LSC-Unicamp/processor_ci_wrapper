@@ -16,6 +16,10 @@ module verification_top (
     output logic [31:0] data_in
 );
 
+`ifndef RVBENCH_DATA_MEM_WIDTH
+`define RVBENCH_DATA_MEM_WIDTH 32
+`endif
+
 logic [31:0] core_data_in;  // Dados de saída (para leitura)
 logic        core_ack;      // Confirmação da transação
 logic        core_cyc;      // Indica uma transação ativa
@@ -30,11 +34,11 @@ logic [31:0] core_data_out; // Dados de entrada (para escrita)
 logic        data_mem_cyc;
 logic        data_mem_stb;
 logic        data_mem_we;
-logic [3:0]  data_mem_sel;
+logic [`RVBENCH_DATA_MEM_WIDTH/8-1:0] data_mem_sel;
 logic [31:0] data_mem_addr;
-logic [31:0] data_mem_data_out;
+logic [`RVBENCH_DATA_MEM_WIDTH-1:0] data_mem_data_out;
 
-logic [31:0] data_mem_data_in;
+logic [`RVBENCH_DATA_MEM_WIDTH-1:0] data_mem_data_in;
 logic        data_mem_ack;
 `endif
 
@@ -105,7 +109,8 @@ Memory #(
 // Instância da segunda memória
 Memory #(
     .MEMORY_FILE (""),
-    .MEMORY_SIZE (4096)
+    .MEMORY_SIZE (4096),
+    .DATA_WIDTH (`RVBENCH_DATA_MEM_WIDTH)
 ) SecondMemory (
     .clk    (clk),
     

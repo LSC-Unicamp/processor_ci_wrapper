@@ -1,17 +1,18 @@
 module Memory #(
     parameter MEMORY_FILE = "",
-    parameter MEMORY_SIZE = 4096
+    parameter MEMORY_SIZE = 4096,
+    parameter DATA_WIDTH = 32
 )(
     input  logic        clk,
 
     input  logic        cyc_i,      // Indica uma transação ativa
     input  logic        stb_i,      // Indica uma solicitação ativa
     input  logic        we_i,       // 1 = Write, 0 = Read
-    input  logic [3:0]  sel_i,      // Byte enables para escrita
+    input  logic [DATA_WIDTH/8-1:0] sel_i,
 
     input  logic [31:0] addr_i,     // Endereço
-    input  logic [31:0] data_i,     // Dados de entrada (para escrita)
-    output logic [31:0] data_o,     // Dados de saída (para leitura)
+    input  logic [DATA_WIDTH-1:0] data_i,
+    output logic [DATA_WIDTH-1:0] data_o,
 
     output logic        ack_o       // Confirmação da transação (agora assíncrona)
 );
@@ -27,7 +28,10 @@ module Memory #(
     end
 
     // Leitura assíncrona
-    assign data_o = (cyc_i && stb_i && !we_i) ? memory[addr_i[BIT_INDEX:2]] : 32'd0;
+    for (genvar lane = 0; lane < DATA_WIDTH/32; lane++) begin : READ_LANES
+        assign data_o[lane*32 +: 32] = (cyc_i && stb_i && !we_i)
+            ? memory[(addr_i[BIT_INDEX:2] + lane) % (MEMORY_SIZE/4)] : 32'd0;
+    end
 
     // Resposta assíncrona de ACK (igual ao antigo `response`)
     assign ack_o = cyc_i && stb_i;  
@@ -35,10 +39,13 @@ module Memory #(
     // Escrita síncrona
     always_ff @(posedge clk) begin
         if (cyc_i && stb_i && we_i) begin
-            if (sel_i[0]) memory[addr_i[BIT_INDEX:2]][7:0]   <= data_i[7:0];
-            if (sel_i[1]) memory[addr_i[BIT_INDEX:2]][15:8]  <= data_i[15:8];
-            if (sel_i[2]) memory[addr_i[BIT_INDEX:2]][23:16] <= data_i[23:16];
-            if (sel_i[3]) memory[addr_i[BIT_INDEX:2]][31:24] <= data_i[31:24];
+            for (int lane = 0; lane < DATA_WIDTH/32; lane++) begin
+                for (int byte_index = 0; byte_index < 4; byte_index++) begin
+                    if (sel_i[lane*4 + byte_index])
+                        memory[(addr_i[BIT_INDEX:2] + lane) % (MEMORY_SIZE/4)][byte_index*8 +: 8]
+                            <= data_i[lane*32 + byte_index*8 +: 8];
+                end
+            end
         end
     end
 
