@@ -133,6 +133,7 @@ def validate_wrapper_simulation(
     timeout: int | None = None,
     vhdl_work_library: str | None = None,
     vhdl_generics: dict[str, object] | None = None,
+    memory_file: str | Path | None = None,
 ):
     """Compile and run the ProcessorCI wrapper signature simulation.
 
@@ -173,6 +174,12 @@ def validate_wrapper_simulation(
             f'Wrapper file does not exist: {wrapper}',
             vcd_path=vcd_path,
         )
+    test_memory = Path(memory_file).resolve() if memory_file else Path(INTERNAL_DIR) / 'memory.hex'
+    if not test_memory.is_file():
+        return _result(
+            cpu_name, wrapper, config_path, 'missing_memory_file', 'setup',
+            f'Signature test memory file does not exist: {test_memory}', vcd_path=vcd_path,
+        )
 
     if is_vhdl:
         # GHDL stores analyzed design units in *-objXX.cf files. Reusing one
@@ -199,7 +206,7 @@ def validate_wrapper_simulation(
             )
         rendered_text = rendered_text.replace(
             '"/eda/processor_ci_connector/internal/memory.hex"',
-            f'"{os.path.join(INTERNAL_DIR, "memory.hex")}"',
+            f'"{test_memory}"',
         )
         with open(rendered_verification_top, 'w', encoding='utf-8') as file:
             file.write(rendered_text)
@@ -337,7 +344,7 @@ def validate_wrapper_simulation(
     )
     verification_text = verification_text.replace(
         '"processor_ci_connector/internal/memory.hex"',
-        f'"{os.path.join(INTERNAL_DIR, "memory.hex")}"',
+        f'"{test_memory}"',
     )
 
     wrapper_text = wrapper.read_text(encoding='utf-8', errors='ignore')
@@ -376,7 +383,7 @@ Memory #(
         )
         verification_text = verification_text.replace(
             '"processor_ci_connector/internal/memory.hex"',
-            f'"{os.path.join(INTERNAL_DIR, "memory.hex")}"',
+            f'"{test_memory}"',
         )
 
     has_core_memory_module = False

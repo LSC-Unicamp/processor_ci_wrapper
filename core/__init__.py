@@ -1,11 +1,15 @@
 import os
+from functools import lru_cache
 from core.bus_defines import PROTOCOLS
-from ollama import Client
 
 SERVER_URL = "http://enqii.lsc.ic.unicamp.br:11434"
 #SERVER_URL = 'http://127.0.0.1:11434'
 #SERVER_URL = os.getenv('SERVER_URL', 'http://127.0.0.1:11434')
-client = Client(host=SERVER_URL)
+
+@lru_cache(maxsize=1)
+def _ollama_client():
+    from ollama import Client
+    return Client(host=SERVER_URL)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CURRENT_DIR = os.getcwd()
@@ -28,7 +32,7 @@ def send_prompt(prompt: str, model: str = 'qwen2.5:14b') -> tuple[bool, str]:
         tuple: A tuple containing a boolean value (indicating success)
                and the model's response as a string.
     """
-    response = client.generate(prompt=prompt, model=model)
+    response = _ollama_client().generate(prompt=prompt, model=model)
 
     # print("Full response:", response)  # Debug: show the full response
 
